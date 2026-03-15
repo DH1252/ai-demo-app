@@ -59,7 +59,8 @@ export async function generateEmbeddingsBatch(
 				input: batch,
 				input_type: inputType,
 				encoding_format: 'float'
-			})
+			}),
+			signal: AbortSignal.timeout(15_000)
 		});
 
 		if (!response.ok) {
@@ -174,7 +175,8 @@ export async function fallbackASRTranscription(
 		headers: {
 			Authorization: `Bearer ${env.NVIDIA_ASR_API_KEY}`
 		},
-		body: formData
+		body: formData,
+		signal: AbortSignal.timeout(60_000)
 	});
 
 	if (!response.ok) {
@@ -216,7 +218,7 @@ export async function processLessonTranscript(
 		(chunk) => `Timestamp: ${chunk.start}s to ${chunk.end}s. ${chunk.text}`
 	);
 
-	// Embed all chunks in one (or a few batched) API requests instead of one call per chunk.
+	// Embed FIRST — if this fails, existing chunks are untouched (no data loss).
 	let vectors: number[][];
 	try {
 		vectors = await generateEmbeddingsBatch(chunkTexts, 'passage');
@@ -225,7 +227,7 @@ export async function processLessonTranscript(
 		throw e;
 	}
 
-	// Bulk-insert all chunks in a single DB round-trip.
+	// Build insert rows now that we have valid vectors.
 	const rows = transcript.map((chunk, i) => ({
 		lessonId,
 		chunkText: chunkTexts[i],
@@ -234,10 +236,16 @@ export async function processLessonTranscript(
 		embedding: vectors[i]
 	}));
 
+	// Atomically replace old chunks only after embeddings succeeded.
+	// Using a transaction ensures we never leave the lesson with zero chunks
+	// if the insert itself fails mid-way.
 	try {
-		await db.insert(lessonChunks).values(rows);
+		await db.transaction(async (tx) => {
+			await tx.delete(lessonChunks).where(eq(lessonChunks.lessonId, lessonId));
+			await tx.insert(lessonChunks).values(rows);
+		});
 	} catch (e) {
-		console.error('Failed to bulk-insert lesson chunks:', e);
+		console.error('Failed to replace lesson chunks in transaction:', e);
 		throw e;
 	}
 }

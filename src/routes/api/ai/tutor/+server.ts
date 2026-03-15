@@ -21,12 +21,22 @@ import type { UIMessage } from 'ai';
 
 const openai = createOpenAI({
 	baseURL: (env.OPENAI_BASE_URL || 'https://integrate.api.nvidia.com/v1').replace(/\/$/, ''),
-	apiKey: env.OPENAI_API_KEY || 'fake-key-for-now'
+	get apiKey() {
+		const key = env.OPENAI_API_KEY;
+		if (!key) throw new Error('Missing required environment variable: OPENAI_API_KEY');
+		return key;
+	}
 });
 
 export const POST: RequestHandler = async ({ request, locals }) => {
 	if (!locals.user) {
 		return new Response('Unauthorized', { status: 401 });
+	}
+
+	// Reject oversized payloads before parsing to prevent memory exhaustion.
+	const contentLength = request.headers.get('content-length');
+	if (contentLength && parseInt(contentLength, 10) > 100_000) {
+		return new Response('Payload too large', { status: 413 });
 	}
 
 	const body = await request.json();
@@ -36,13 +46,22 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 	}
 
 	const messages = parsed.data.messages as Array<Omit<UIMessage, 'id'>>;
+
+	// Cap conversation history: keep the first message (seeded question context)
+	// plus the most recent 20 to avoid silently overflowing the model context window.
+	const MAX_HISTORY = 20;
+	const cappedMessages =
+		messages.length > MAX_HISTORY + 1 ? [messages[0], ...messages.slice(-MAX_HISTORY)] : messages;
+
 	const reqUrl = new URL(request.url);
 	const lessonId = reqUrl.searchParams.get('lessonId');
 	const rawMode = reqUrl.searchParams.get('mode');
 	const tutorMode: 'hint' | 'explain' = rawMode === 'explain' ? 'explain' : 'hint';
 
 	// Find the last message sent by the user (role check prevents picking up assistant messages).
-	const lastUserMessageObj = [...messages].reverse().find((m) => (m as any).role === 'user') as
+	const lastUserMessageObj = [...cappedMessages]
+		.reverse()
+		.find((m) => (m as any).role === 'user') as
 		| { role: string; content?: unknown; parts?: Array<{ type?: string; text?: string }> }
 		| undefined;
 
@@ -88,7 +107,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 	}
 
 	// Count prior assistant turns to drive explain-mode escalation tiers.
-	const assistantTurnCount = messages.filter((m) => (m as any).role === 'assistant').length;
+	const assistantTurnCount = cappedMessages.filter((m) => (m as any).role === 'assistant').length;
 	const nextExchange = assistantTurnCount + 1;
 
 	let modeBlock: string;
@@ -114,7 +133,10 @@ Current tier instruction: ${tier}\n`;
 - If the student is stuck, rephrase the question or offer a smaller hint — never the answer.\n`;
 	}
 
-	const systemPrompt = `You are a friendly, encouraging AI Study Mascot Tutor. You are tutoring ${locals.user.name}.
+	// Sanitize display name to prevent prompt injection via crafted usernames.
+	const safeName = locals.user.name.replace(/[^\w\s'\-]/g, '').trim() || 'Student';
+
+	const systemPrompt = `You are a friendly, encouraging AI Study Mascot Tutor. You are tutoring ${safeName}.
 
 RULES:
 1. Be uplifting, highly encouraging, and fun. Use 1-2 emojis per message maximum.
@@ -149,102 +171,110 @@ ${memoryString}`;
 	// Per-request flag — prevents the tool from firing more than once per turn.
 	let memoryFactSaved = false;
 
-	const result = streamText({
-		model: wrapLanguageModel({
-			model: openai.chat(env.AI_MODEL || 'nvidia/nemotron-3-super-120b-a12b'),
-			middleware: extractReasoningMiddleware({ tagName: 'think' })
-		}),
-		temperature: 1,
-		topP: 0.95,
-		system: systemPrompt,
-		messages: await convertToModelMessages(messages),
-		// Allow up to 5 steps so the model has room to: call the tool, receive the
-		// result, and still produce a visible text reply even if the first tool call
-		// attempt has an unexpected shape.
-		stopWhen: stepCountIs(5),
-		tools: {
-			saveMemoryFact: tool({
-				description:
-					'Save a personal fact about the student to memory. Call this only when the student is actively stating new personal information — a hobby, interest, learning preference, or life detail. Do NOT call for questions, greetings, or academic content.',
-				inputSchema: z.object({
-					summary: z
-						.string()
-						.describe(
-							'A single plain-English sentence describing the fact. Example: "Student enjoys board games." Pass a plain string — do NOT use nested objects or key-value pairs.'
-						)
-				}),
-				execute: async (input: { summary: string }) => {
-					if (memoryFactSaved) return 'Memory already saved this turn.';
+	try {
+		const result = streamText({
+			model: wrapLanguageModel({
+				model: openai.chat(env.AI_MODEL || 'nvidia/nemotron-3-super-120b-a12b'),
+				middleware: extractReasoningMiddleware({ tagName: 'think' })
+			}),
+			temperature: 1,
+			topP: 0.95,
+			system: systemPrompt,
+			messages: await convertToModelMessages(cappedMessages),
+			// Allow up to 5 steps so the model has room to: call the tool, receive the
+			// result, and still produce a visible text reply even if the first tool call
+			// attempt has an unexpected shape.
+			stopWhen: stepCountIs(5),
+			tools: {
+				saveMemoryFact: tool({
+					description:
+						'Save a personal fact about the student to memory. Call this only when the student is actively stating new personal information — a hobby, interest, learning preference, or life detail. Do NOT call for questions, greetings, or academic content.',
+					inputSchema: z.object({
+						summary: z
+							.string()
+							.describe(
+								'A single plain-English sentence describing the fact. Example: "Student enjoys board games." Pass a plain string — do NOT use nested objects or key-value pairs.'
+							)
+					}),
+					execute: async (input: { summary: string }) => {
+						if (memoryFactSaved) return 'Memory already saved this turn.';
 
-					// The model sometimes sends non-standard shapes such as
-					// { hobby: "..." } or { properties: { hobby: "..." } }
-					// instead of { summary: "..." }. Extract any string value
-					// we can find rather than hard-failing.
-					let fact: string = input.summary?.trim() ?? '';
-					if (!fact) {
-						const raw = input as unknown as Record<string, unknown>;
-						outer: for (const v of Object.values(raw)) {
-							if (typeof v === 'string' && v.trim()) {
-								fact = v.trim();
-								break;
-							}
-							if (typeof v === 'object' && v !== null) {
-								for (const inner of Object.values(v as Record<string, unknown>)) {
-									if (typeof inner === 'string' && inner.trim()) {
-										fact = inner.trim();
-										break outer;
+						// The model sometimes sends non-standard shapes such as
+						// { hobby: "..." } or { properties: { hobby: "..." } }
+						// instead of { summary: "..." }. Extract any string value
+						// we can find rather than hard-failing.
+						let fact: string = input.summary?.trim() ?? '';
+						if (!fact) {
+							const raw = input as unknown as Record<string, unknown>;
+							outer: for (const v of Object.values(raw)) {
+								if (typeof v === 'string' && v.trim()) {
+									fact = v.trim();
+									break;
+								}
+								if (typeof v === 'object' && v !== null) {
+									for (const inner of Object.values(v as Record<string, unknown>)) {
+										if (typeof inner === 'string' && inner.trim()) {
+											fact = inner.trim();
+											break outer;
+										}
 									}
 								}
 							}
 						}
+
+						if (!fact) return 'No fact found in input — nothing was saved.';
+						memoryFactSaved = true;
+						await saveStudentMemory(userId, fact);
+						return 'Fact saved to student memory successfully.';
 					}
-
-					if (!fact) return 'No fact found in input — nothing was saved.';
-					memoryFactSaved = true;
-					await saveStudentMemory(userId, fact);
-					return 'Fact saved to student memory successfully.';
+				})
+			},
+			onStepFinish: (step) => {
+				if (!isAiDebugEnabled()) return;
+				console.log(`\n[AI DEBUG] ── Step ${step.stepNumber} ──`);
+				console.log(`[AI DEBUG]  Finish reason : ${step.finishReason}`);
+				if (step.reasoningText) {
+					const preview = step.reasoningText.slice(0, 500);
+					console.log(
+						`[AI DEBUG]  Reasoning     : ${preview}${step.reasoningText.length > 500 ? '…' : ''}`
+					);
 				}
-			})
-		},
-		onStepFinish: (step) => {
-			if (!isAiDebugEnabled()) return;
-			console.log(`\n[AI DEBUG] ── Step ${step.stepNumber} ──`);
-			console.log(`[AI DEBUG]  Finish reason : ${step.finishReason}`);
-			if (step.reasoningText) {
-				const preview = step.reasoningText.slice(0, 500);
-				console.log(
-					`[AI DEBUG]  Reasoning     : ${preview}${step.reasoningText.length > 500 ? '…' : ''}`
-				);
+				if (step.text) {
+					const preview = step.text.slice(0, 500);
+					console.log(`[AI DEBUG]  Text          : ${preview}${step.text.length > 500 ? '…' : ''}`);
+				}
+				if (step.toolCalls && step.toolCalls.length > 0) {
+					console.log(`[AI DEBUG]  Tool calls    : ${JSON.stringify(step.toolCalls)}`);
+				}
+				if (step.toolResults && step.toolResults.length > 0) {
+					console.log(`[AI DEBUG]  Tool results  : ${JSON.stringify(step.toolResults)}`);
+				}
+				if (step.usage) {
+					console.log(
+						`[AI DEBUG]  Usage         : input=${step.usage.inputTokens} output=${step.usage.outputTokens}`
+					);
+				}
+			},
+			onFinish: (result) => {
+				if (!isAiDebugEnabled()) return;
+				console.log('\n[AI DEBUG] ════════════════ Request Complete ════════════════');
+				console.log(`[AI DEBUG]  Steps         : ${result.steps.length}`);
+				console.log(`[AI DEBUG]  Finish reason : ${result.finishReason}`);
+				if (result.usage) {
+					console.log(
+						`[AI DEBUG]  Total usage   : input=${result.usage.inputTokens} output=${result.usage.outputTokens} total=${result.usage.totalTokens}`
+					);
+				}
+				console.log('[AI DEBUG] ═══════════════════════════════════════════════════\n');
 			}
-			if (step.text) {
-				const preview = step.text.slice(0, 500);
-				console.log(`[AI DEBUG]  Text          : ${preview}${step.text.length > 500 ? '…' : ''}`);
-			}
-			if (step.toolCalls && step.toolCalls.length > 0) {
-				console.log(`[AI DEBUG]  Tool calls    : ${JSON.stringify(step.toolCalls)}`);
-			}
-			if (step.toolResults && step.toolResults.length > 0) {
-				console.log(`[AI DEBUG]  Tool results  : ${JSON.stringify(step.toolResults)}`);
-			}
-			if (step.usage) {
-				console.log(
-					`[AI DEBUG]  Usage         : input=${step.usage.inputTokens} output=${step.usage.outputTokens}`
-				);
-			}
-		},
-		onFinish: (result) => {
-			if (!isAiDebugEnabled()) return;
-			console.log('\n[AI DEBUG] ════════════════ Request Complete ════════════════');
-			console.log(`[AI DEBUG]  Steps         : ${result.steps.length}`);
-			console.log(`[AI DEBUG]  Finish reason : ${result.finishReason}`);
-			if (result.usage) {
-				console.log(
-					`[AI DEBUG]  Total usage   : input=${result.usage.inputTokens} output=${result.usage.outputTokens} total=${result.usage.totalTokens}`
-				);
-			}
-			console.log('[AI DEBUG] ═══════════════════════════════════════════════════\n');
-		}
-	});
+		});
 
-	return result.toUIMessageStreamResponse();
+		return result.toUIMessageStreamResponse();
+	} catch (e) {
+		console.error('Tutor streamText initialisation failed:', e);
+		return new Response(JSON.stringify({ error: 'AI service unavailable. Please try again.' }), {
+			status: 500,
+			headers: { 'Content-Type': 'application/json' }
+		});
+	}
 };

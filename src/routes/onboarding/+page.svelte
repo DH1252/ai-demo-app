@@ -1,11 +1,18 @@
 <script lang="ts">
-	import { Send, User as UserIcon, Loader2, BookOpen, Bot, CheckCircle2 } from 'lucide-svelte';
+	import {
+		Send,
+		User as UserIcon,
+		Loader2,
+		BookOpen,
+		Bot,
+		CheckCircle2,
+		AlertCircle
+	} from 'lucide-svelte';
 	import { Chat } from '@ai-sdk/svelte';
 	import { DefaultChatTransport } from 'ai';
 	import type { PageData } from './$types';
 	import { onMount } from 'svelte';
 	import MarkdownMessage from '$lib/MarkdownMessage.svelte';
-	import { resolve } from '$app/paths';
 
 	let { data } = $props() as { data: PageData };
 
@@ -73,6 +80,18 @@
 
 	let inputStr = $state('');
 
+	// Scroll chat log to bottom on new messages when already near the bottom.
+	let chatLog = $state<HTMLElement | null>(null);
+	$effect(() => {
+		const _ = chat.messages.length;
+		const el = chatLog;
+		if (!el) return;
+		const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+		if (nearBottom) {
+			el.scrollTop = el.scrollHeight;
+		}
+	});
+
 	function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
 		if (chat.status !== 'ready') return;
@@ -102,6 +121,7 @@
 		</div>
 
 		<div
+			bind:this={chatLog}
 			class="flex-1 space-y-4 overflow-y-auto overscroll-contain bg-base-100 p-4"
 			role="log"
 			aria-live="polite"
@@ -154,7 +174,7 @@
 									</div>
 								{/if}
 							{/each}
-							{#if message.role === 'assistant' && chat.status === 'streaming' && message === chat.messages.at(-1)}
+							{#if message.role === 'assistant' && chat.status === 'streaming' && message.id === chat.messages.at(-1)?.id}
 								<span class="mt-1 inline-flex items-center gap-0.5 opacity-50">
 									<span
 										class="inline-block h-1.5 w-1.5 animate-bounce rounded-full bg-current [animation-delay:-0.3s]"
@@ -198,12 +218,23 @@
 					</div>
 				</div>
 			{/if}
+
+			{#if chat.status === 'error'}
+				<div
+					class="alert flex items-center gap-2 rounded-xl text-sm alert-error shadow-sm"
+					role="alert"
+				>
+					<AlertCircle size={16} class="shrink-0" />
+					<span class="flex-1">Something went wrong. Please try again.</span>
+					<button class="btn btn-ghost btn-sm" onclick={() => chat.regenerate()}>Retry</button>
+				</div>
+			{/if}
 		</div>
 
 		{#if onboardingComplete}
 			<div class="shrink-0 border-t border-base-300 bg-base-200 p-4">
 				<a
-					href={resolve('/learn')}
+					href="/learn"
 					class="btn min-h-12 w-full rounded-full font-bold text-success-content shadow-[0_4px_0_0_#16a34a] btn-lg btn-success"
 				>
 					<BookOpen size={20} /> Start Learning

@@ -147,12 +147,31 @@ export const actions = {
 			return fail(404, { error: 'Lesson not found.' });
 		}
 
-		// Gate: check lesson is not locked.
-		const allLessons = await getOrderedLessonsForUser(userId);
-		const progressRows = await db
-			.select({ lessonId: userProgress.lessonId, status: userProgress.status })
-			.from(userProgress)
-			.where(eq(userProgress.userId, userId));
+		// Fan out the three independent reads in parallel — none depend on each other.
+		const [allLessons, progressRows, heartAndProgressRows] = await Promise.all([
+			getOrderedLessonsForUser(userId),
+			db
+				.select({ lessonId: userProgress.lessonId, status: userProgress.status })
+				.from(userProgress)
+				.where(eq(userProgress.userId, userId)),
+			// Heart check + existing progress fetched together as they're also independent.
+			Promise.all([
+				locals.user.role !== 'admin'
+					? db
+							.select({ hearts: users.hearts, heartsLastUpdated: users.heartsLastUpdated })
+							.from(users)
+							.where(eq(users.id, userId))
+							.limit(1)
+					: Promise.resolve([] as { hearts: number; heartsLastUpdated: string | null }[]),
+				db
+					.select({ status: userProgress.status, startedAt: userProgress.startedAt })
+					.from(userProgress)
+					.where(and(eq(userProgress.userId, userId), eq(userProgress.lessonId, lesson.id)))
+					.limit(1)
+			])
+		]);
+
+		const [heartRows, existingProgressRows] = heartAndProgressRows;
 		const lessonsWithStatus = withDerivedLessonStatus(allLessons, progressRows);
 		const lessonStatus = lessonsWithStatus.find((l) => l.id === lesson.id)?.status;
 		if (lessonStatus === 'locked') {
@@ -161,11 +180,6 @@ export const actions = {
 
 		// Gate: check hearts (admins bypass).
 		if (locals.user.role !== 'admin') {
-			const heartRows = await db
-				.select({ hearts: users.hearts, heartsLastUpdated: users.heartsLastUpdated })
-				.from(users)
-				.where(eq(users.id, userId))
-				.limit(1);
 			const storedHearts = heartRows[0]?.hearts ?? 5;
 			const storedLastUpdated = heartRows[0]?.heartsLastUpdated ?? null;
 			const regen = computeRegenHearts(storedHearts, storedLastUpdated);
@@ -224,13 +238,6 @@ export const actions = {
 		const isPerfect = incorrectCount === 0;
 		const nowIso = new Date().toISOString();
 		const todayIso = nowIso.slice(0, 10); // YYYY-MM-DD
-
-		// Read progress row for server-side elapsed time + completion state.
-		const existingProgressRows = await db
-			.select({ status: userProgress.status, startedAt: userProgress.startedAt })
-			.from(userProgress)
-			.where(and(eq(userProgress.userId, userId), eq(userProgress.lessonId, lesson.id)))
-			.limit(1);
 
 		const alreadyCompleted = existingProgressRows[0]?.status === 'completed';
 		const startedAtIso = existingProgressRows[0]?.startedAt ?? null;

@@ -1,6 +1,15 @@
-<script lang="ts">
+<script lang="ts" module>
 	import { marked } from 'marked';
 
+	// Singleton renderer — created once per module, not once per component mount.
+	const renderer = new marked.Renderer();
+	renderer.link = ({ href, title, text: linkText }) => {
+		const titleAttr = title ? ` title="${title}"` : '';
+		return `<a href="${href}" target="_blank" rel="noopener noreferrer"${titleAttr}>${linkText}</a>`;
+	};
+</script>
+
+<script lang="ts">
 	type Props = {
 		text: string;
 		// True only while this specific message bubble is the actively-streaming
@@ -10,14 +19,6 @@
 	};
 
 	let { text, streaming = false }: Props = $props();
-
-	// Configure marked: no implicit line breaks (GFM default), open links in
-	// new tab via a custom renderer so internal navigation is not broken.
-	const renderer = new marked.Renderer();
-	renderer.link = ({ href, title, text: linkText }) => {
-		const titleAttr = title ? ` title="${title}"` : '';
-		return `<a href="${href}" target="_blank" rel="noopener noreferrer"${titleAttr}>${linkText}</a>`;
-	};
 
 	// Strip <think>...</think> reasoning blocks emitted by Nemotron / other
 	// reasoning models.
@@ -66,14 +67,24 @@
 		return raw;
 	}
 
+	const stripped = $derived(stripThinkBlocks(text, streaming));
+
+	// During active streaming, skip the markdown parser entirely — re-parsing on every
+	// incoming chunk is expensive. Render as plain text until the stream completes.
 	const html = $derived(
-		marked(stripThinkBlocks(text, streaming), {
-			renderer,
-			gfm: true,
-			breaks: false
-		}) as string
+		streaming
+			? null
+			: (marked(stripped, {
+					renderer,
+					gfm: true,
+					breaks: false
+				}) as string)
 	);
 </script>
 
 <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-<div class="markdown-body">{@html html}</div>
+{#if html !== null}
+	<div class="markdown-body">{@html html}</div>
+{:else}
+	<p class="whitespace-pre-wrap">{stripped}</p>
+{/if}

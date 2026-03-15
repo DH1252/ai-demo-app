@@ -5,7 +5,7 @@ import {
 	lessons,
 	userLearningPathSelections
 } from '$lib/server/db/schema';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 
 type LessonListItem = {
 	id: string;
@@ -90,29 +90,20 @@ export async function getLessonsForPath(pathId: string | null): Promise<LessonLi
 
 	if (!pathId) return null;
 
-	const mapped = await db
-		.select({ lessonId: learningPathLessons.lessonId })
-		.from(learningPathLessons)
-		.where(eq(learningPathLessons.pathId, pathId))
-		.orderBy(asc(learningPathLessons.order));
-
-	const orderedLessonIds = mapped.map((row) => row.lessonId);
-	if (orderedLessonIds.length === 0) return [];
-
-	const lessonRows = await db
+	// Single JOIN query instead of two round-trips.
+	const rows = await db
 		.select({
 			id: lessons.id,
 			title: lessons.title,
-			type: lessons.type
+			type: lessons.type,
+			order: learningPathLessons.order
 		})
-		.from(lessons)
-		.where(inArray(lessons.id, orderedLessonIds));
+		.from(learningPathLessons)
+		.innerJoin(lessons, eq(lessons.id, learningPathLessons.lessonId))
+		.where(eq(learningPathLessons.pathId, pathId))
+		.orderBy(asc(learningPathLessons.order));
 
-	const lessonById = new Map(lessonRows.map((lesson) => [lesson.id, lesson]));
-
-	return orderedLessonIds
-		.map((id) => lessonById.get(id))
-		.filter((lesson): lesson is LessonListItem => Boolean(lesson));
+	return rows.map(({ id, title, type }) => ({ id, title, type }));
 }
 
 export async function getOrderedLessonsForUser(userId: string | null): Promise<LessonListItem[]> {
@@ -182,12 +173,15 @@ export async function selectPathForUser(userId: string, pathId: string) {
 		return false;
 	}
 
-	await db.delete(userLearningPathSelections).where(eq(userLearningPathSelections.userId, userId));
-
-	await db.insert(userLearningPathSelections).values({
-		userId,
-		pathId
-	});
+	// Use upsert instead of delete+insert to eliminate the TOCTOU race window
+	// where a concurrent request could read a missing row between the two statements.
+	await db
+		.insert(userLearningPathSelections)
+		.values({ userId, pathId })
+		.onConflictDoUpdate({
+			target: userLearningPathSelections.userId,
+			set: { pathId, selectedAt: new Date().toISOString() }
+		});
 
 	return true;
 }

@@ -3,6 +3,26 @@ import { redirect } from '@sveltejs/kit';
 import type { Handle } from '@sveltejs/kit';
 import { hasOnboardingProfileMemory } from '$lib/server/learningPaths';
 
+// ---------------------------------------------------------------------------
+// In-memory rate limiter for /api/ai/* endpoints.
+// Limits each authenticated user to AI_RATE_LIMIT requests per 60-second window.
+// Uses a sliding window: timestamps older than 60 s are evicted on each check.
+// ---------------------------------------------------------------------------
+const AI_RATE_LIMIT = 20; // max requests per window
+const AI_RATE_WINDOW_MS = 60_000; // 60 seconds
+
+const aiRequestLog = new Map<string, number[]>();
+
+function isAiRateLimited(userId: string): boolean {
+	const now = Date.now();
+	const windowStart = now - AI_RATE_WINDOW_MS;
+	const timestamps = (aiRequestLog.get(userId) ?? []).filter((t) => t > windowStart);
+	if (timestamps.length >= AI_RATE_LIMIT) return true;
+	timestamps.push(now);
+	aiRequestLog.set(userId, timestamps);
+	return false;
+}
+
 export const handle: Handle = async ({ event, resolve }) => {
 	const sessionToken = event.cookies.get('session');
 
@@ -90,5 +110,19 @@ export const handle: Handle = async ({ event, resolve }) => {
 		throw redirect(302, '/learn');
 	}
 
-	return resolve(event);
+	// Rate-limit AI endpoints per authenticated user.
+	if (path.startsWith('/api/ai/') && event.locals.user) {
+		if (isAiRateLimited(event.locals.user.id)) {
+			return new Response('Too Many Requests', { status: 429 });
+		}
+	}
+
+	const response = await resolve(event);
+
+	// Security headers — applied to every response.
+	response.headers.set('X-Frame-Options', 'SAMEORIGIN');
+	response.headers.set('X-Content-Type-Options', 'nosniff');
+	response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+
+	return response;
 };

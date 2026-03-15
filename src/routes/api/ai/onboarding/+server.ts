@@ -28,13 +28,23 @@ function isRetryableTimeoutError(error: unknown): boolean {
 
 const openai = createOpenAI({
 	baseURL: (env.OPENAI_BASE_URL || 'https://integrate.api.nvidia.com/v1').replace(/\/$/, ''),
-	apiKey: env.OPENAI_API_KEY || 'fake-key-for-now'
+	get apiKey() {
+		const key = env.OPENAI_API_KEY;
+		if (!key) throw new Error('Missing required environment variable: OPENAI_API_KEY');
+		return key;
+	}
 });
 
 export const POST: RequestHandler = async ({ request, locals }) => {
 	// Return 401 if unauthorized
 	if (!locals.user) {
 		return new Response('Unauthorized', { status: 401 });
+	}
+
+	// Reject oversized payloads before parsing to prevent memory exhaustion.
+	const contentLength = request.headers.get('content-length');
+	if (contentLength && parseInt(contentLength, 10) > 100_000) {
+		return new Response('Payload too large', { status: 413 });
 	}
 
 	const userId = locals.user.id;

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { Send, Sparkles, User as UserIcon, Loader2, Bot } from 'lucide-svelte';
+	import { Send, Sparkles, User as UserIcon, Loader2, Bot, AlertCircle } from 'lucide-svelte';
 	import { Chat } from '@ai-sdk/svelte';
 	import { DefaultChatTransport } from 'ai';
 	import { page } from '$app/state';
@@ -71,6 +71,20 @@
 
 	let inputStr = $state('');
 
+	// Scroll the chat log to the bottom when new messages arrive,
+	// but only if the user is already near the bottom (within 120px).
+	let chatLog = $state<HTMLElement | null>(null);
+	$effect(() => {
+		// Track message count to re-run on each new message.
+		const _ = chat.messages.length;
+		const el = chatLog;
+		if (!el) return;
+		const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+		if (nearBottom) {
+			el.scrollTop = el.scrollHeight;
+		}
+	});
+
 	function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
 		if (chat.status !== 'ready') return;
@@ -136,6 +150,7 @@
 	</div>
 
 	<div
+		bind:this={chatLog}
 		class="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain bg-base-200/40 p-4"
 		role="log"
 		aria-live="polite"
@@ -259,6 +274,17 @@
 				<div class="h-px flex-1 bg-base-300"></div>
 				<span class="shrink-0 font-semibold">Switched to Explain Mode</span>
 				<div class="h-px flex-1 bg-base-300"></div>
+			</div>
+		{/if}
+
+		{#if chat.status === 'error'}
+			<div
+				class="alert flex items-center gap-2 rounded-xl text-sm alert-error shadow-sm"
+				role="alert"
+			>
+				<AlertCircle size={16} class="shrink-0" />
+				<span class="flex-1">Something went wrong. Please try again.</span>
+				<button class="btn btn-ghost btn-sm" onclick={() => chat.regenerate()}>Retry</button>
 			</div>
 		{/if}
 	</div>

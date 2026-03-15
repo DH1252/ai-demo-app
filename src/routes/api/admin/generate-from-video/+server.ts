@@ -103,6 +103,12 @@ function isPrivateIPv4(value: string): boolean {
 
 function isPrivateIPv6(value: string): boolean {
 	const normalized = value.toLowerCase();
+	// ::ffff:x.x.x.x is an IPv6-mapped IPv4 address — treat it as IPv4 for
+	// SSRF purposes so that e.g. ::ffff:127.0.0.1 is correctly blocked.
+	if (normalized.startsWith('::ffff:')) {
+		const ipv4Part = normalized.slice('::ffff:'.length);
+		return isPrivateIPv4(ipv4Part);
+	}
 	return (
 		normalized === '::1' ||
 		normalized.startsWith('fc') ||
