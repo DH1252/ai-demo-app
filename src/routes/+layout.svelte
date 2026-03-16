@@ -4,7 +4,7 @@
 	import { userState, initializeState, syncState } from '$lib/state/user.svelte';
 	import { showToast } from '$lib/state/toast.svelte';
 	import ToastContainer from '$lib/ToastContainer.svelte';
-	import { Heart, Flame, Coins, Home, BookOpen, Bot, User } from 'lucide-svelte';
+	import { Heart, Flame, Coins, Zap, Home, BookOpen, Bot, User } from 'lucide-svelte';
 	import { page } from '$app/state';
 	import { base } from '$app/paths';
 
@@ -119,25 +119,33 @@
 			>
 				<!-- Streak -->
 				<div
-					class="flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-full bg-orange-50 px-3 py-1.5 text-sm font-bold text-orange-500 ring-1 ring-orange-100"
+					class="flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-full bg-orange-50 px-2 py-1.5 text-sm font-bold text-orange-500 ring-1 ring-orange-100"
 				>
-					<Flame size={16} fill="currentColor" />
+					<Flame size={15} fill="currentColor" />
 					<span>{userState.streak}</span>
+				</div>
+
+				<!-- XP -->
+				<div
+					class="flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-full bg-emerald-50 px-2 py-1.5 text-sm font-bold text-emerald-600 ring-1 ring-emerald-100"
+				>
+					<Zap size={15} fill="currentColor" />
+					<span>{userState.xp}</span>
 				</div>
 
 				<!-- Coins -->
 				<div
-					class="flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-full bg-primary/10 px-3 py-1.5 text-sm font-bold text-primary ring-1 ring-primary/20"
+					class="flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-full bg-primary/10 px-2 py-1.5 text-sm font-bold text-primary ring-1 ring-primary/20"
 				>
-					<Coins size={16} fill="currentColor" />
+					<Coins size={15} fill="currentColor" />
 					<span>{userState.coins}</span>
 				</div>
 
 				<!-- Hearts -->
 				<div
-					class="flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-full bg-red-50 px-3 py-1.5 text-sm font-bold text-red-500 ring-1 ring-red-100"
+					class="flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-full bg-red-50 px-2 py-1.5 text-sm font-bold text-red-500 ring-1 ring-red-100"
 				>
-					<Heart size={16} fill={userState.hearts > 0 ? 'currentColor' : 'none'} />
+					<Heart size={15} fill={userState.hearts > 0 ? 'currentColor' : 'none'} />
 					<span>{userState.hearts}</span>
 				</div>
 			</header>

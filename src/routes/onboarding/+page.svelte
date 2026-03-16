@@ -46,7 +46,13 @@
 		);
 	});
 
-	let onboardingComplete = $derived(completionFromServer || completionFromChat);
+	// Only show the "Start Learning" button once BOTH conditions are met:
+	// 1. Onboarding is marked complete (tool result received or server confirmed)
+	// 2. The AI has fully finished streaming its last reply (chat.status === 'ready')
+	//    — prevents the button from appearing mid-stream while Buddy is still talking.
+	let onboardingComplete = $derived(
+		(completionFromServer || completionFromChat) && chat.status === 'ready'
+	);
 
 	onMount(() => {
 		// Send starter prompt only once per mounted chat instance.

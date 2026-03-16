@@ -111,7 +111,7 @@
 						required
 						autocomplete="username"
 						placeholder="e.g. alexd123"
-						class="input-bordered input h-12 rounded-xl lowercase"
+						class="input-bordered input h-12 rounded-xl"
 					/>
 				</div>
 
