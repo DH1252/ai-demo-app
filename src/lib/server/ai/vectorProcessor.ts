@@ -159,7 +159,8 @@ export async function processVideoAndEmbed(
 }
 
 export async function fallbackASRTranscription(
-	audioBlob: Blob
+	audioBlob: Blob,
+	signal?: AbortSignal
 ): Promise<{ text: string; start: number; end: number }[]> {
 	const formData = new FormData();
 	// Default to mp3 as safe extension, parakeet usually sniffs the headers anyway, but mp3/wav is standard.
@@ -176,7 +177,7 @@ export async function fallbackASRTranscription(
 			Authorization: `Bearer ${env.NVIDIA_ASR_API_KEY}`
 		},
 		body: formData,
-		signal: AbortSignal.timeout(60_000)
+		signal: signal ?? AbortSignal.timeout(60_000)
 	});
 
 	if (!response.ok) {

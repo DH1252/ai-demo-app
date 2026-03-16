@@ -13,6 +13,10 @@ import {
 	setActivePath,
 	setPathLessons
 } from '$lib/server/learningPaths';
+import {
+	getUnsupportedExternalVideoUrlMessage,
+	isSupportedExternalVideoUrl
+} from '$lib/video/providers';
 
 function parseNonNegativeInteger(raw: string): number | null {
 	if (!/^\d+$/.test(raw.trim())) {
@@ -25,6 +29,16 @@ function parseNonNegativeInteger(raw: string): number | null {
 	}
 
 	return value;
+}
+
+function normalizeOptionalVideoUrl(raw: FormDataEntryValue | null): string | null {
+	if (typeof raw !== 'string') return null;
+	const trimmed = raw.trim();
+	if (!trimmed) return null;
+	if (!isSupportedExternalVideoUrl(trimmed)) {
+		throw new Error(getUnsupportedExternalVideoUrlMessage());
+	}
+	return trimmed;
 }
 
 export const load: PageServerLoad = async () => {
@@ -70,6 +84,15 @@ export const actions = {
 			return fail(400, { error: 'Missing required fields.' });
 		}
 
+		let normalizedVideoUrl: string | null;
+		try {
+			normalizedVideoUrl = normalizeOptionalVideoUrl(videoUrl);
+		} catch (error) {
+			return fail(400, {
+				error: error instanceof Error ? error.message : 'Unsupported external video URL provided.'
+			});
+		}
+
 		try {
 			const inserted = await db
 				.insert(lessons)
@@ -77,7 +100,7 @@ export const actions = {
 					title: title.toString(),
 					type: type.toString() as 'standard' | 'test' | 'ai-remedial',
 					contentData: contentData.toString(),
-					videoUrl: videoUrl ? videoUrl.toString() : null
+					videoUrl: normalizedVideoUrl
 				})
 				.returning({ id: lessons.id });
 
@@ -97,8 +120,8 @@ export const actions = {
 					await db.update(lessons).set({ s3Key }).where(eq(lessons.id, newLessonId));
 				}
 
-				if (videoUrl || (mediaFile && mediaFile.size > 0)) {
-					const urlString = videoUrl ? videoUrl.toString() : '';
+				if (normalizedVideoUrl || (mediaFile && mediaFile.size > 0)) {
+					const urlString = normalizedVideoUrl ?? '';
 					await processVideoAndEmbed(
 						newLessonId,
 						urlString,
@@ -217,6 +240,15 @@ export const actions = {
 			return fail(400, { error: 'Invalid content JSON.' });
 		}
 
+		let normalizedVideoUrl: string | null;
+		try {
+			normalizedVideoUrl = normalizeOptionalVideoUrl(videoUrl);
+		} catch (error) {
+			return fail(400, {
+				error: error instanceof Error ? error.message : 'Unsupported external video URL provided.'
+			});
+		}
+
 		try {
 			const existingRows = await db
 				.select({ id: lessons.id })
@@ -233,8 +265,7 @@ export const actions = {
 				.set({
 					title: title.toString(),
 					type: lessonType as 'standard' | 'test' | 'ai-remedial',
-					videoUrl:
-						videoUrl && videoUrl.toString().trim() !== '' ? videoUrl.toString().trim() : null,
+					videoUrl: normalizedVideoUrl,
 					contentData: contentDataString
 				})
 				.where(eq(lessons.id, id))

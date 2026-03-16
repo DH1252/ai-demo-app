@@ -7,11 +7,15 @@ import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
+const BASELINE_REQUIRED_TABLES = ['users', 'lessons', 'lesson_chunks', 'student_memories'];
 
 const isRailway = Boolean(process.env.RAILWAY_PROJECT_ID);
+const legacyMigrateFlag = process.env.RUN_DB_PUSH_ON_START;
+const migrateOnStartFlag = process.env.RUN_DB_MIGRATE_ON_START;
 const shouldMigrate =
-	process.env.RUN_DB_PUSH_ON_START === 'true' ||
-	(isRailway && process.env.RUN_DB_PUSH_ON_START !== 'false');
+	migrateOnStartFlag === 'true' ||
+	(migrateOnStartFlag !== 'false' && legacyMigrateFlag === 'true') ||
+	(isRailway && migrateOnStartFlag !== 'false' && legacyMigrateFlag !== 'false');
 
 function run(command, args) {
 	const result = spawnSync(command, args, {
@@ -64,13 +68,19 @@ async function baselineIfNeeded() {
 	const client = createClient({ url: dbUrl });
 
 	try {
-		// Check if the DB already has application tables (pre-migration production DB).
-		const tablesResult = await client.execute(
-			"SELECT name FROM sqlite_master WHERE type='table' AND name='users'"
-		);
+		const requiredTablesSql = BASELINE_REQUIRED_TABLES.map(() => '?').join(', ');
+		const tablesResult = await client.execute({
+			sql: `SELECT name FROM sqlite_master WHERE type='table' AND name IN (${requiredTablesSql})`,
+			args: BASELINE_REQUIRED_TABLES
+		});
 		if (tablesResult.rows.length === 0) {
 			// Fresh DB — let db:migrate build everything from scratch.
 			console.log('[startup] Fresh database detected — no baseline needed.');
+			return;
+		}
+
+		if (tablesResult.rows.length !== BASELINE_REQUIRED_TABLES.length) {
+			console.log('[startup] Partial pre-migration schema detected — skipping baseline.');
 			return;
 		}
 
@@ -85,7 +95,7 @@ async function baselineIfNeeded() {
 
 		// Existing DB without migration tracking — create the table and mark all
 		// current migrations as applied so db:migrate treats them as already done.
-		console.log('[startup] Baseling existing database for migration tracking...');
+		console.log('[startup] Baselining existing database for migration tracking...');
 
 		await client.execute(`
       CREATE TABLE __drizzle_migrations (

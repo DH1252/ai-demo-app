@@ -21,6 +21,7 @@
 	import { DefaultChatTransport } from 'ai';
 	import MarkdownMessage from '$lib/MarkdownMessage.svelte';
 	import { showToast } from '$lib/state/toast.svelte';
+	import { normalizeVideoEmbedUrl } from '$lib/video/providers';
 
 	let { data, form } = $props() as { data: PageData; form: ActionData };
 
@@ -83,40 +84,7 @@
 		heartCountdown = data.nextHeartInSeconds ?? 0;
 	});
 
-	function normalizeYouTubeEmbedUrl(url: string): string | null {
-		try {
-			const parsed = new URL(url);
-			const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
-
-			let videoId: string | null = null;
-
-			if (host === 'youtu.be') {
-				videoId = parsed.pathname.split('/').filter(Boolean)[0] ?? null;
-			} else if (
-				host === 'youtube.com' ||
-				host === 'm.youtube.com' ||
-				host === 'youtube-nocookie.com'
-			) {
-				if (parsed.pathname.startsWith('/watch')) {
-					videoId = parsed.searchParams.get('v');
-				} else if (parsed.pathname.startsWith('/embed/')) {
-					videoId = parsed.pathname.split('/')[2] ?? null;
-				} else if (parsed.pathname.startsWith('/shorts/')) {
-					videoId = parsed.pathname.split('/')[2] ?? null;
-				}
-			}
-
-			if (!videoId) return null;
-
-			return `https://www.youtube-nocookie.com/embed/${videoId}`;
-		} catch {
-			return null;
-		}
-	}
-
-	let iframeSrc = $derived(
-		currentVideoUrl ? (normalizeYouTubeEmbedUrl(currentVideoUrl) ?? currentVideoUrl) : null
-	);
+	let iframeSrc = $derived(currentVideoUrl ? normalizeVideoEmbedUrl(currentVideoUrl) : null);
 
 	const questions = $derived(parseQuestions(data.lesson?.contentData ?? ''));
 	const selectedAnswers = $derived(

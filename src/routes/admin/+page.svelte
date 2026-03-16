@@ -21,6 +21,12 @@
 		Trophy,
 		Bug
 	} from 'lucide-svelte';
+	import {
+		DEFAULT_VIDEO_INPUT_EXAMPLE,
+		SUPPORTED_EXTERNAL_VIDEO_HELP_TEXT,
+		getUnsupportedExternalVideoUrlMessage,
+		isSupportedExternalVideoUrl
+	} from '$lib/video/providers';
 
 	let { data, form } = $props() as { data: PageData; form: ActionData };
 
@@ -122,6 +128,8 @@
 	let analysisProgress = $state(0);
 	let analysisStatus = $state('Idle');
 	let analysisLogs = $state<string[]>([]);
+	const supportedExternalVideoHelpText = SUPPORTED_EXTERNAL_VIDEO_HELP_TEXT;
+	let analysisAbortController = $state<AbortController | null>(null);
 
 	const contentDataString = $derived(
 		JSON.stringify({
@@ -379,12 +387,23 @@
 		analysisLogs = [...analysisLogs, `[${timestamp}] ${message}`];
 	}
 
+	function cancelVideoAnalysis() {
+		analysisAbortController?.abort();
+		analysisStatus = 'Cancelled';
+		addAnalysisLog('Video analysis cancelled by admin.');
+	}
+
 	async function analyzeVideoAndGenerateQuestions() {
 		const mediaFile = mediaFiles?.item(0) ?? null;
 		const trimmedVideoUrl = videoUrlValue.trim();
 
 		if (!trimmedVideoUrl && !mediaFile) {
 			analyzeError = 'Add a video URL or upload a media file before analyzing.';
+			return;
+		}
+
+		if (trimmedVideoUrl && !isSupportedExternalVideoUrl(trimmedVideoUrl)) {
+			analyzeError = getUnsupportedExternalVideoUrlMessage();
 			return;
 		}
 
@@ -398,9 +417,10 @@
 		analysisProgress = 3;
 		analysisStatus = 'Starting';
 		analysisLogs = [];
+		analysisAbortController = new AbortController();
 		addAnalysisLog('Preparing video analysis request.');
 		if (trimmedVideoUrl) {
-			addAnalysisLog(`Video URL detected: ${trimmedVideoUrl}`);
+			addAnalysisLog('Supported external video URL detected.');
 		}
 		if (mediaFile) {
 			addAnalysisLog(
@@ -417,7 +437,8 @@
 
 			const response = await fetch('/api/admin/generate-from-video', {
 				method: 'POST',
-				body: payload
+				body: payload,
+				signal: analysisAbortController.signal
 			});
 
 			if (!response.ok) {
@@ -428,6 +449,12 @@
 				} catch {
 					const text = await response.text();
 					message = text || message;
+				}
+				if (response.status === 429) {
+					message = message || 'Too many video generation requests. Please retry later.';
+				} else if (response.status === 503) {
+					message =
+						message || 'Video generation is busy right now. Wait for the active job to finish.';
 				}
 				throw new Error(message);
 			}
@@ -441,6 +468,9 @@
 			let generatedQuestions: GeneratedQuestion[] = [];
 
 			outer: while (true) {
+				if (analysisAbortController.signal.aborted) {
+					throw new DOMException('Video analysis cancelled.', 'AbortError');
+				}
 				const { done, value } = await reader.read();
 				if (done) break;
 
@@ -503,11 +533,17 @@
 				? generatedDrafts
 				: [...questions, ...generatedDrafts];
 		} catch (error) {
+			if (error instanceof DOMException && error.name === 'AbortError') {
+				analyzeError = null;
+				analysisStatus = 'Cancelled';
+				return;
+			}
 			analyzeError = error instanceof Error ? error.message : 'Failed to analyze video.';
 			analysisStatus = 'Failed';
 			addAnalysisLog(analyzeError);
 		} finally {
 			isAnalyzingVideo = false;
+			analysisAbortController = null;
 		}
 	}
 
@@ -555,6 +591,13 @@
 			return;
 		}
 
+		const trimmedVideoUrl = editVideoUrl.trim();
+		if (trimmedVideoUrl && !isSupportedExternalVideoUrl(trimmedVideoUrl)) {
+			event.preventDefault();
+			editContentError = getUnsupportedExternalVideoUrlMessage();
+			return;
+		}
+
 		if (
 			editQuestions.length === 0 ||
 			editQuestions.some((question) => !questionDraftIsValid(question))
@@ -575,6 +618,13 @@
 		if (!adminSecretValue.trim()) {
 			event.preventDefault();
 			createFormError = 'Enter admin secret before publishing a lesson.';
+			return;
+		}
+
+		const trimmedVideoUrl = videoUrlValue.trim();
+		if (trimmedVideoUrl && !isSupportedExternalVideoUrl(trimmedVideoUrl)) {
+			event.preventDefault();
+			createFormError = getUnsupportedExternalVideoUrlMessage();
 			return;
 		}
 
@@ -696,7 +746,7 @@
 					<div class="form-control w-full">
 						<label class="label" for="edit-video-url">
 							<span class="label-text flex items-center gap-1 font-medium"
-								><Film size={16} /> Video URL</span
+								><Film size={16} /> External Video URL</span
 							>
 							<span class="label-text-alt text-base-content/60">Optional</span>
 						</label>
@@ -706,8 +756,13 @@
 							name="videoUrl"
 							bind:value={editVideoUrl}
 							class="input-bordered input min-h-11"
-							placeholder="https://www.youtube.com/watch?v=..."
+							placeholder={DEFAULT_VIDEO_INPUT_EXAMPLE}
 						/>
+						<label class="label" for="edit-video-url">
+							<span class="label-text-alt text-base-content/60">
+								{supportedExternalVideoHelpText}
+							</span>
+						</label>
 					</div>
 
 					<div class="form-control w-full gap-3">
@@ -898,7 +953,7 @@
 					<div class="form-control w-full">
 						<label class="label" for="videoUrl">
 							<span class="label-text flex items-center gap-1 font-medium"
-								><Film size={16} /> Video Embed URL</span
+								><Film size={16} /> External Video URL</span
 							>
 							<span class="label-text-alt text-base-content/60">Optional</span>
 						</label>
@@ -907,9 +962,14 @@
 							id="videoUrl"
 							name="videoUrl"
 							bind:value={videoUrlValue}
-							placeholder="https://www.youtube.com/watch?v=..."
+							placeholder={DEFAULT_VIDEO_INPUT_EXAMPLE}
 							class="input-bordered input min-h-11"
 						/>
+						<label class="label" for="videoUrl">
+							<span class="label-text-alt text-base-content/60">
+								{supportedExternalVideoHelpText}
+							</span>
+						</label>
 					</div>
 
 					<div class="form-control w-full">
@@ -961,6 +1021,15 @@
 										<Sparkles size={16} /> Analyze Video & Generate Questions
 									{/if}
 								</button>
+								{#if isAnalyzingVideo}
+									<button
+										class="btn btn-outline btn-sm"
+										type="button"
+										onclick={cancelVideoAnalysis}
+									>
+										<X size={16} /> Cancel Analysis
+									</button>
+								{/if}
 								<button class="btn btn-outline btn-sm" type="button" onclick={addQuestion}>
 									<PlusCircle size={16} /> Add Question
 								</button>
@@ -968,7 +1037,7 @@
 						</div>
 
 						{#if analyzeError}
-							<div class="alert py-2 alert-warning">
+							<div class="alert py-2 alert-warning" role="alert" aria-live="polite">
 								<span>{analyzeError}</span>
 							</div>
 						{/if}
@@ -985,7 +1054,7 @@
 										value={analysisProgress}
 										max="100"
 									></progress>
-									<p class="text-xs opacity-70">Status: {analysisStatus}</p>
+									<p class="text-xs opacity-70" aria-live="polite">Status: {analysisStatus}</p>
 
 									<div
 										class="max-h-44 overflow-y-auto rounded-lg border border-base-300 bg-base-200/60 p-3"

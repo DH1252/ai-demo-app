@@ -69,7 +69,7 @@ This repository is now preconfigured for Railway via `railway.json`.
 4. Add the rest of the environment variables listed below.
 5. Create an Object Storage bucket in Railway and copy bucket credentials into the app variables.
 6. Redeploy the service.
-7. On first boot, schema bootstrap runs automatically via `npm run db:push` before server start.
+7. On first boot, schema bootstrap runs automatically via `npm run db:migrate` before server start.
 
 ### Required Environment Variables
 
@@ -79,7 +79,7 @@ Use `.env.example` as the source of truth. At minimum, set:
 NODE_ENV=production
 HOST=0.0.0.0
 PORT=3000
-RUN_DB_PUSH_ON_START=true
+RUN_DB_MIGRATE_ON_START=true
 
 DATABASE_URL=/data/sqlite.db
 ADMIN_SECRET=replace-with-a-strong-secret
@@ -101,4 +101,5 @@ SECRET_ACCESS_KEY=...
 
 1. The app is configured with `@sveltejs/adapter-node` and starts with `node build/index.js`.
 2. Railway sets `PORT`; host binding is forced to `0.0.0.0` in `railway.json`.
-3. Startup uses `scripts/railway-start.mjs` to run schema push automatically unless you set `RUN_DB_PUSH_ON_START=false`.
+3. Startup uses `scripts/railway-start.mjs` to run schema migrations automatically unless you set `RUN_DB_MIGRATE_ON_START=false`.
+4. Railway is configured for a single replica in `railway.json`, which matches the current in-memory admin job concurrency guard assumptions.

@@ -3,6 +3,12 @@ import { env } from '$env/dynamic/private';
 import { z } from 'zod';
 import { fallbackASRTranscription } from '$lib/server/ai/vectorProcessor';
 import { extractAudioFromVideo } from '$lib/server/ai/audioExtractor';
+import {
+	finishAdminVideoJob,
+	isAdminVideoRateLimited,
+	tryStartAdminVideoJob
+} from '$lib/server/ai/debugState';
+import { getVideoProvider, isSupportedExternalVideoUrl } from '$lib/video/providers';
 import ytdl from '@distube/ytdl-core';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
@@ -124,6 +130,35 @@ function isPrivateIp(value: string): boolean {
 	return false;
 }
 
+function createAbortError(message: string): Error {
+	const error = new Error(message);
+	error.name = 'AbortError';
+	return error;
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+	if (!signal.aborted) return;
+	throw createAbortError('Request cancelled.');
+}
+
+function redactRemoteUrl(urlValue: string): string {
+	try {
+		const parsed = new URL(urlValue);
+		return `${parsed.origin}${parsed.pathname}`;
+	} catch {
+		return 'remote-source';
+	}
+}
+
+function getClientRateLimitKey(request: Request): string {
+	const forwardedFor = request.headers.get('x-forwarded-for');
+	if (forwardedFor) {
+		return forwardedFor.split(',')[0]?.trim() || 'unknown-client';
+	}
+
+	return request.headers.get('x-real-ip')?.trim() || 'unknown-client';
+}
+
 async function isSafeRemoteHost(urlValue: string): Promise<boolean> {
 	const parsed = new URL(urlValue);
 	const hostname = parsed.hostname.toLowerCase();
@@ -148,9 +183,11 @@ async function isSafeRemoteHost(urlValue: string): Promise<boolean> {
 	return true;
 }
 
-async function fromYoutube(videoUrl: string): Promise<TranscriptChunk[]> {
+async function fromYoutube(videoUrl: string, signal?: AbortSignal): Promise<TranscriptChunk[]> {
+	if (signal?.aborted) throw createAbortError('Transcript fetch cancelled.');
 	try {
 		const transcript = await YoutubeTranscript.fetchTranscript(videoUrl);
+		if (signal?.aborted) throw createAbortError('Transcript fetch cancelled.');
 		return transcript.map((row: { text: string; offset: number; duration: number }) => ({
 			text: row.text,
 			start: row.offset / 1000,
@@ -161,10 +198,11 @@ async function fromYoutube(videoUrl: string): Promise<TranscriptChunk[]> {
 	}
 }
 
-async function downloadYoutubeAudioBlob(videoUrl: string): Promise<Blob> {
+async function downloadYoutubeAudioBlob(videoUrl: string, signal: AbortSignal): Promise<Blob> {
 	if (!ytdl.validateURL(videoUrl)) {
 		throw new Error('Invalid YouTube URL for media download.');
 	}
+	throwIfAborted(signal);
 
 	const maxBytes = 100 * 1024 * 1024;
 	const chunks: Buffer[] = [];
@@ -177,7 +215,17 @@ async function downloadYoutubeAudioBlob(videoUrl: string): Promise<Blob> {
 			highWaterMark: 1 << 24
 		});
 
+		const abortDownload = () => {
+			stream.destroy(createAbortError('YouTube audio download cancelled.'));
+		};
+
+		signal.addEventListener('abort', abortDownload, { once: true });
+
 		stream.on('data', (chunk: Buffer) => {
+			if (signal.aborted) {
+				stream.destroy(createAbortError('YouTube audio download cancelled.'));
+				return;
+			}
 			totalBytes += chunk.length;
 			if (totalBytes > maxBytes) {
 				stream.destroy(new Error('Downloaded YouTube audio exceeds 100MB limit.'));
@@ -186,9 +234,16 @@ async function downloadYoutubeAudioBlob(videoUrl: string): Promise<Blob> {
 			chunks.push(chunk);
 		});
 
-		stream.on('end', () => resolve());
-		stream.on('error', (error) => reject(error));
+		stream.on('end', () => {
+			signal.removeEventListener('abort', abortDownload);
+			resolve();
+		});
+		stream.on('error', (error) => {
+			signal.removeEventListener('abort', abortDownload);
+			reject(error);
+		});
 	});
+	throwIfAborted(signal);
 
 	const blobParts = chunks.map(
 		(chunk) =>
@@ -197,10 +252,11 @@ async function downloadYoutubeAudioBlob(videoUrl: string): Promise<Blob> {
 	return new Blob(blobParts, { type: 'audio/mp4' });
 }
 
-async function downloadRemoteMediaBlob(mediaUrl: string): Promise<Blob> {
+async function downloadRemoteMediaBlob(mediaUrl: string, signal: AbortSignal): Promise<Blob> {
 	const maxBytes = 100 * 1024 * 1024;
+	throwIfAborted(signal);
 	const response = await fetch(mediaUrl, {
-		signal: AbortSignal.timeout(45_000)
+		signal
 	});
 
 	if (!response.ok || !response.body) {
@@ -208,6 +264,13 @@ async function downloadRemoteMediaBlob(mediaUrl: string): Promise<Blob> {
 	}
 
 	const contentType = response.headers.get('content-type') || 'application/octet-stream';
+	const contentLength = response.headers.get('content-length');
+	if (contentLength) {
+		const declaredBytes = Number.parseInt(contentLength, 10);
+		if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+			throw new Error('Remote media exceeds 100MB limit.');
+		}
+	}
 	const mediaTypeAllowed =
 		contentType.startsWith('video/') ||
 		contentType.startsWith('audio/') ||
@@ -222,6 +285,7 @@ async function downloadRemoteMediaBlob(mediaUrl: string): Promise<Blob> {
 	let totalBytes = 0;
 
 	while (true) {
+		throwIfAborted(signal);
 		const { done, value } = await reader.read();
 		if (done) break;
 		if (!value) continue;
@@ -244,7 +308,8 @@ async function downloadRemoteMediaBlob(mediaUrl: string): Promise<Blob> {
 async function generateQuestionsFromTranscript(
 	transcriptContext: string,
 	count: number,
-	strictConceptMode = false
+	strictConceptMode = false,
+	signal?: AbortSignal
 ): Promise<unknown> {
 	const baseUrl = (env.OPENAI_BASE_URL || 'https://integrate.api.nvidia.com/v1').replace(/\/$/, '');
 	const apiKey = env.OPENAI_API_KEY || '';
@@ -290,7 +355,7 @@ ${transcriptContext}`;
 
 	const response = await fetch(`${baseUrl}/chat/completions`, {
 		method: 'POST',
-		signal: AbortSignal.timeout(45_000),
+		signal: signal ?? AbortSignal.timeout(45_000),
 		headers: {
 			Authorization: `Bearer ${apiKey}`,
 			'Content-Type': 'application/json'
@@ -361,6 +426,9 @@ function shuffleOptions(question: z.infer<typeof questionSchema>): z.infer<typeo
 
 export const POST: RequestHandler = async ({ request }) => {
 	const encoder = new TextEncoder();
+	const abortController = new AbortController();
+	request.signal.addEventListener('abort', () => abortController.abort(), { once: true });
+	const clientKey = getClientRateLimitKey(request);
 
 	// ── Early validation (returns plain JSON errors before any stream opens) ──
 	const formData = await request.formData();
@@ -381,12 +449,26 @@ export const POST: RequestHandler = async ({ request }) => {
 		return json({ error: 'Invalid admin secret.' }, { status: 403 });
 	}
 
+	if (isAdminVideoRateLimited(clientKey)) {
+		return json(
+			{ error: 'Too many video generation requests. Please wait a few minutes and retry.' },
+			{ status: 429 }
+		);
+	}
+
 	if (!videoUrl && (!mediaFile || mediaFile.size === 0)) {
 		return json({ error: 'Provide a video URL or upload a media file first.' }, { status: 400 });
 	}
 
 	if (videoUrl && !isLikelyHttpUrl(videoUrl)) {
 		return json({ error: 'Video URL must start with http:// or https://.' }, { status: 400 });
+	}
+
+	if (videoUrl && !isSupportedExternalVideoUrl(videoUrl) && !isLikelyVideoPath(videoUrl)) {
+		return json(
+			{ error: 'Unsupported remote video host. Use YouTube or upload a native media file.' },
+			{ status: 400 }
+		);
 	}
 
 	if (videoUrl && !(await isSafeRemoteHost(videoUrl))) {
@@ -408,6 +490,16 @@ export const POST: RequestHandler = async ({ request }) => {
 		}
 	}
 
+	if (!tryStartAdminVideoJob()) {
+		return json(
+			{
+				error:
+					'Video generation is already running. Wait for the current job to finish or cancel it.'
+			},
+			{ status: 503 }
+		);
+	}
+
 	// ── SSE stream — all processing happens inside here ──
 	type SseEvent =
 		| { type: 'log'; message: string; progress?: number; status?: string }
@@ -416,7 +508,24 @@ export const POST: RequestHandler = async ({ request }) => {
 
 	const stream = new ReadableStream<Uint8Array>({
 		async start(controller) {
+			const provider = videoUrl ? getVideoProvider(videoUrl) : null;
+			const redactedVideoUrl = videoUrl ? redactRemoteUrl(videoUrl) : '';
+			const safeMediaDescription = mediaFile
+				? `${mediaFile.name} (${(mediaFile.size / 1024).toFixed(0)} KB)`
+				: null;
+
+			const closeOnAbort = () => {
+				try {
+					controller.close();
+				} catch {
+					// stream already closed
+				}
+			};
+
+			abortController.signal.addEventListener('abort', closeOnAbort, { once: true });
+
 			const emit = (event: SseEvent) => {
+				if (abortController.signal.aborted) return;
 				try {
 					controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
 				} catch {
@@ -433,14 +542,19 @@ export const POST: RequestHandler = async ({ request }) => {
 				});
 
 			try {
+				throwIfAborted(abortController.signal);
 				log('Request validated. Starting analysis pipeline.', 3, 'Starting');
 
 				if (videoUrl) {
-					log(`Source: URL — ${videoUrl}`, 4);
+					log(
+						provider
+							? `Source: ${provider.label} URL — ${redactedVideoUrl}`
+							: `Source: direct media URL — ${redactedVideoUrl}`,
+						4
+					);
 				}
-				if (mediaFile && mediaFile.size > 0) {
-					const kb = (mediaFile.size / 1024).toFixed(0);
-					log(`Source: Uploaded file — ${mediaFile.name} (${kb} KB)`, 4);
+				if (safeMediaDescription) {
+					log(`Source: Uploaded file — ${safeMediaDescription}`, 4);
 				}
 				log(`Target: ${questionCount} question${questionCount === 1 ? '' : 's'}.`, 5, 'Starting');
 
@@ -449,7 +563,7 @@ export const POST: RequestHandler = async ({ request }) => {
 				// ── Stage 1: YouTube captions ──
 				if (videoUrl) {
 					log('Fetching YouTube captions...', 8, 'Fetching captions');
-					const raw = await fromYoutube(videoUrl);
+					const raw = await fromYoutube(videoUrl, abortController.signal);
 					const normalized = normalizeTranscript(raw);
 
 					if (normalized.length > 0) {
@@ -473,7 +587,7 @@ export const POST: RequestHandler = async ({ request }) => {
 
 							if (ytdl.validateURL(videoUrl)) {
 								log('Identified as YouTube video — downloading audio-only stream...', 16);
-								downloadedBlob = await downloadYoutubeAudioBlob(videoUrl);
+								downloadedBlob = await downloadYoutubeAudioBlob(videoUrl, abortController.signal);
 								const mb = (downloadedBlob.size / 1024 / 1024).toFixed(2);
 								log(
 									`YouTube audio downloaded (${mb} MB). Preparing for transcription...`,
@@ -482,7 +596,7 @@ export const POST: RequestHandler = async ({ request }) => {
 								);
 							} else {
 								log('Identified as direct media URL — downloading...', 16);
-								downloadedBlob = await downloadRemoteMediaBlob(videoUrl);
+								downloadedBlob = await downloadRemoteMediaBlob(videoUrl, abortController.signal);
 								const mb = (downloadedBlob.size / 1024 / 1024).toFixed(2);
 								log(
 									`Remote media downloaded (${mb} MB, type: ${downloadedBlob.type || 'unknown'}).`,
@@ -503,7 +617,10 @@ export const POST: RequestHandler = async ({ request }) => {
 								const videoFile = new File([downloadedBlob], 'remote-video', {
 									type: downloadedBlob.type || 'video/mp4'
 								});
-								const extractedAudio = await extractAudioFromVideo(videoFile);
+								const extractedAudio = await extractAudioFromVideo(
+									videoFile,
+									abortController.signal
+								);
 								const mb = (extractedAudio.size / 1024 / 1024).toFixed(2);
 								log(
 									`Audio extracted (${mb} MB). Sending to speech recognition API...`,
@@ -511,7 +628,7 @@ export const POST: RequestHandler = async ({ request }) => {
 									'Transcribing'
 								);
 								transcriptData = normalizeTranscript(
-									await fallbackASRTranscription(extractedAudio)
+									await fallbackASRTranscription(extractedAudio, abortController.signal)
 								);
 							} else {
 								const mb = (downloadedBlob.size / 1024 / 1024).toFixed(2);
@@ -521,7 +638,7 @@ export const POST: RequestHandler = async ({ request }) => {
 									'Transcribing'
 								);
 								transcriptData = normalizeTranscript(
-									await fallbackASRTranscription(downloadedBlob)
+									await fallbackASRTranscription(downloadedBlob, abortController.signal)
 								);
 							}
 
@@ -542,8 +659,11 @@ export const POST: RequestHandler = async ({ request }) => {
 								);
 							}
 						} catch (downloadErr) {
+							if (downloadErr instanceof Error && downloadErr.name === 'AbortError') {
+								return;
+							}
 							log(
-								`Audio download/ASR failed: ${downloadErr instanceof Error ? downloadErr.message : 'unknown error'}`,
+								`Audio download/ASR failed: ${downloadErr instanceof Error ? downloadErr.message : 'request failed'}`,
 								60
 							);
 						}
@@ -559,7 +679,7 @@ export const POST: RequestHandler = async ({ request }) => {
 
 					if (mediaFile.type.startsWith('video/')) {
 						log('Video file detected — extracting audio with FFmpeg...', 20, 'Extracting audio');
-						audioBlob = await extractAudioFromVideo(mediaFile);
+						audioBlob = await extractAudioFromVideo(mediaFile, abortController.signal);
 						const mb = (audioBlob.size / 1024 / 1024).toFixed(2);
 						log(
 							`Audio extracted (${mb} MB). Sending to speech recognition API...`,
@@ -575,7 +695,9 @@ export const POST: RequestHandler = async ({ request }) => {
 						);
 					}
 
-					transcriptData = normalizeTranscript(await fallbackASRTranscription(audioBlob));
+					transcriptData = normalizeTranscript(
+						await fallbackASRTranscription(audioBlob, abortController.signal)
+					);
 
 					if (transcriptData.length > 0) {
 						const wordCount = transcriptData.reduce(
@@ -621,7 +743,9 @@ export const POST: RequestHandler = async ({ request }) => {
 
 				const parsedObject = await generateQuestionsFromTranscript(
 					transcriptContext,
-					questionCount
+					questionCount,
+					false,
+					abortController.signal
 				);
 
 				// ── Stage 5: Validate ──
@@ -657,7 +781,8 @@ export const POST: RequestHandler = async ({ request }) => {
 					const regenerated = await generateQuestionsFromTranscript(
 						transcriptContext,
 						questionCount,
-						true
+						true,
+						abortController.signal
 					);
 
 					log('Strict mode response received. Re-validating schema...', 94);
@@ -694,13 +819,19 @@ export const POST: RequestHandler = async ({ request }) => {
 
 				emit({ type: 'done', questions: finalQuestions });
 			} catch (error) {
+				if (error instanceof Error && error.name === 'AbortError') {
+					return;
+				}
 				const message =
 					error instanceof Error
-						? error.message
+						? 'Failed to analyze video and generate questions.'
 						: 'Failed to analyze video and generate questions.';
-				log(`Unexpected error: ${message}`, undefined, 'Error');
+				console.error('Admin generate-from-video failed:', error);
+				log(message, undefined, 'Error');
 				emit({ type: 'error', message });
 			} finally {
+				abortController.signal.removeEventListener('abort', closeOnAbort);
+				finishAdminVideoJob();
 				controller.close();
 			}
 		}

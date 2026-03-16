@@ -2,20 +2,7 @@ import { validateSessionToken } from '$lib/server/auth';
 import { redirect } from '@sveltejs/kit';
 import type { Handle } from '@sveltejs/kit';
 import { hasOnboardingProfileMemory } from '$lib/server/learningPaths';
-
-const VIDEO_FRAME_SOURCES = [
-	'https://www.youtube-nocookie.com',
-	'https://www.youtube.com',
-	'https://player.vimeo.com',
-	'https://fast.wistia.net',
-	'https://share.vidyard.com',
-	'https://www.loom.com',
-	'https://www.dailymotion.com'
-];
-
-function mergeUniqueSources(...sourceGroups: string[][]): string[] {
-	return [...new Set(sourceGroups.flat())];
-}
+import { VIDEO_FRAME_SOURCES } from '$lib/video/providers';
 
 function buildContentSecurityPolicy(): string {
 	const directives = {
@@ -25,7 +12,7 @@ function buildContentSecurityPolicy(): string {
 		'img-src': ["'self'", 'data:', 'blob:'],
 		'connect-src': ["'self'"],
 		'font-src': ["'self'", 'data:'],
-		'frame-src': mergeUniqueSources(VIDEO_FRAME_SOURCES)
+		'frame-src': VIDEO_FRAME_SOURCES
 	};
 
 	return Object.entries(directives)
