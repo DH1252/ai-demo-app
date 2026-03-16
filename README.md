@@ -1,6 +1,41 @@
-# AI Demo App
+# Buddy AI - Smart SvelteKit AI Tutor
 
-SvelteKit + Drizzle + SQLite + AI tutor workflows with Railway object storage for lesson media.
+An interactive, AI-powered tutoring application built with SvelteKit. Buddy AI combines intelligent conversational tutoring with gamified learning mechanics to keep students engaged.
+
+## Features
+
+- **Context-Aware AI Tutor:** A dedicated `/tutor` chat interface with persistent history across client-side navigation.
+  - **Hint & Explain Modes:** The tutor starts in "Hint" mode to guide students. If a student struggles (3+ exchanges), it auto-escalates to "Explain" mode to break down concepts further.
+  - **Rich Responses:** Full Markdown and KaTeX (LaTeX) support for math and science topics.
+- **Interactive Lessons:** Quizzes with shuffled answers, real-time feedback, and an embedded "Buddy" panel that explains incorrect answers on the spot.
+- **Content Generation:** Admin tools to automatically generate structured lessons from YouTube videos.
+
+## Gamified Student Mechanics
+
+To keep students motivated, Buddy AI implements a full suite of gamification systems:
+
+- **❤️ Hearts (Lives System):**
+  - Students need hearts to start lessons. If hearts reach 0, lessons are gated by a full-screen overlay.
+  - **Passive Regen:** +1 heart automatically regenerates every 30 minutes.
+  - **Purchase:** Students can buy 1 heart for 5 coins.
+  - **UI Indicators:** A pulsing red hearts pill and warning banners alert the student when they are out of lives.
+- **⭐ XP & Ranks:**
+  - Earning XP progresses students through five tiers: **Bronze (0) ➔ Silver (600) ➔ Gold (1200) ➔ Platinum (2000) ➔ Diamond (3000)**.
+  - Partial XP is awarded based on lesson performance.
+  - Real-time toast notifications celebrate rank-ups.
+- **🪙 Coins:** Earned by completing lessons. Used as an in-game currency to refill hearts.
+- **🔥 Streaks:** Tracks daily engagement and consistency.
+- **🔔 Toast System:** A custom, top-anchored slide-down toast system (capped at 3 simultaneous notifications) instantly notifies users of XP gains, heart losses, rank ups, and streak updates.
+
+## Technology Stack
+
+- **Frontend Core:** Svelte 5 (Runes: `$state`, `$derived`, `$effect`) & SvelteKit.
+- **Styling:** Tailwind CSS v4 & daisyUI.
+- **Database:** SQLite (via `better-sqlite3`) and Drizzle ORM.
+- **AI Integration:** Vercel AI SDK (`@ai-sdk/svelte`) using `DefaultChatTransport` for streaming responses.
+- **Deployment:** Preconfigured for Railway with persistent volume storage and S3-compatible Object Storage.
+
+---
 
 ## Local Development
 
