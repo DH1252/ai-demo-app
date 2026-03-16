@@ -57,7 +57,11 @@ async function baselineIfNeeded() {
 		return;
 	}
 
-	const client = createClient({ url: process.env.DATABASE_URL });
+	// @libsql/client requires a proper URI scheme. Railway sets DATABASE_URL to
+	// a bare path like "/data/sqlite.db" — prefix it with "file:" if needed.
+	const rawUrl = process.env.DATABASE_URL;
+	const dbUrl = rawUrl.startsWith('file:') ? rawUrl : `file:${rawUrl}`;
+	const client = createClient({ url: dbUrl });
 
 	try {
 		// Check if the DB already has application tables (pre-migration production DB).
