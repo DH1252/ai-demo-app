@@ -263,16 +263,19 @@ export const actions = {
 			else if (elapsedSeconds < 420) speedBonus = 5;
 
 			independenceBonus = usedTutor ? 0 : 5;
+		}
 
-			if (!alreadyCompleted) {
-				// First perfect completion — full reward.
-				coinsAwarded = correctCount;
-				xpAwarded = correctCount * 5 + 10 + speedBonus + independenceBonus;
-			} else {
-				// Repeat perfect completion — half XP, no coins.
-				isRetryBonus = true;
-				xpAwarded = Math.floor((correctCount * 5 + 10 + speedBonus + independenceBonus) / 2);
-			}
+		// Base XP for every correct answer; perfect run adds flat bonus + speed/independence.
+		const rawXp = correctCount * 5 + (isPerfect ? 10 + speedBonus + independenceBonus : 0);
+
+		if (!alreadyCompleted) {
+			// First completion — full base XP; coins + bonuses only on perfect.
+			xpAwarded = rawXp;
+			coinsAwarded = isPerfect ? correctCount : 0;
+		} else {
+			// Repeat attempt — half XP, no coins.
+			isRetryBonus = true;
+			xpAwarded = Math.floor(rawXp / 2);
 		}
 
 		// --- Streak update (first perfect completion only) ---
@@ -299,34 +302,42 @@ export const actions = {
 
 			newStreak = u.streak;
 
-			// Award XP + coins.
-			if (isPerfect && xpAwarded > 0) {
-				// Compute streak update (only on first perfect completion).
-				if (!alreadyCompleted) {
-					const streakResult = computeStreak(u.streak, u.lastActiveDate, todayIso);
-					newStreak = streakResult.newStreak;
-					streakGained = streakResult.gained;
-				}
+			// Award XP (partial for imperfect runs, full for perfect).
+			if (xpAwarded > 0) {
+				if (isPerfect) {
+					// Streak only on first perfect completion.
+					if (!alreadyCompleted) {
+						const streakResult = computeStreak(u.streak, u.lastActiveDate, todayIso);
+						newStreak = streakResult.newStreak;
+						streakGained = streakResult.gained;
+					}
 
-				await tx
-					.update(users)
-					.set({
-						xp: sql`${users.xp} + ${xpAwarded}`,
-						coins: sql`${users.coins} + ${coinsAwarded}`,
-						streak: newStreak,
-						lastActiveDate: todayIso,
-						heartsLastUpdated: u.heartsLastUpdated ?? nowIso
-					})
-					.where(eq(users.id, userId));
-
-				if (!alreadyCompleted) {
 					await tx
-						.insert(userProgress)
-						.values({ userId, lessonId: lesson.id, status: 'completed', startedAt: startedAtIso })
-						.onConflictDoUpdate({
-							target: [userProgress.userId, userProgress.lessonId],
-							set: { status: 'completed' }
-						});
+						.update(users)
+						.set({
+							xp: sql`${users.xp} + ${xpAwarded}`,
+							coins: sql`${users.coins} + ${coinsAwarded}`,
+							streak: newStreak,
+							lastActiveDate: todayIso,
+							heartsLastUpdated: u.heartsLastUpdated ?? nowIso
+						})
+						.where(eq(users.id, userId));
+
+					if (!alreadyCompleted) {
+						await tx
+							.insert(userProgress)
+							.values({ userId, lessonId: lesson.id, status: 'completed', startedAt: startedAtIso })
+							.onConflictDoUpdate({
+								target: [userProgress.userId, userProgress.lessonId],
+								set: { status: 'completed' }
+							});
+					}
+				} else {
+					// Imperfect run — partial XP only, no coins/streak/progress changes.
+					await tx
+						.update(users)
+						.set({ xp: sql`${users.xp} + ${xpAwarded}` })
+						.where(eq(users.id, userId));
 				}
 			}
 

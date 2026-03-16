@@ -9,17 +9,18 @@
 		Bot,
 		Send,
 		User as UserIcon,
-		Flame,
 		Heart,
 		Clock,
 		Coins
 	} from 'lucide-svelte';
 	import { resolve } from '$app/paths';
 	import { goto, invalidateAll } from '$app/navigation';
+	import { enhance } from '$app/forms';
 	import type { ActionData, PageData } from './$types';
 	import { Chat } from '@ai-sdk/svelte';
 	import { DefaultChatTransport } from 'ai';
 	import MarkdownMessage from '$lib/MarkdownMessage.svelte';
+	import { showToast } from '$lib/state/toast.svelte';
 
 	let { data, form } = $props() as { data: PageData; form: ActionData };
 
@@ -136,6 +137,7 @@
 
 	const submitted = $derived(Boolean(form?.result));
 	const isPerfect = $derived(Boolean(form?.result?.isPerfect));
+	let submitting = $state(false);
 	const questionResults = $derived<QuestionResult[]>(
 		form?.result?.questionResults ?? localQuestionResults
 	);
@@ -159,26 +161,32 @@
 
 	const progress = $derived.by(() => {
 		if (questions.length === 0) return 0;
-		if (submitted) return 100;
+		if (submitting) return 100;
 		const checkedCount = checkedQuestions.filter(Boolean).length;
 		return Math.round((checkedCount / questions.length) * 100);
 	});
 
 	// ── Buddy AI derived ─────────────────────────────────────────────────────
-	// Switch to explain mode once any checked question is wrong.
-	const chatMode = $derived(
-		questions.some((_, i) => checkedQuestions[i] === true && !localQuestionResults[i]?.isCorrect)
+	// Tracks which question the tutor panel was last opened for.
+	let activeTutorQuestionIndex = $state<number | null>(null);
+
+	// Explain mode once the student has checked or submitted the active question (correct or wrong).
+	// Hint mode only while the question has not been attempted yet.
+	const chatMode = $derived<'hint' | 'explain'>(
+		activeTutorQuestionIndex !== null && (checkedQuestions[activeTutorQuestionIndex] || submitted)
 			? 'explain'
 			: 'hint'
 	);
-	const chatApi = $derived(`/api/ai/tutor?lessonId=${data.lesson?.id ?? ''}&mode=${chatMode}`);
+	const chatApi = $derived(
+		`/api/ai/tutor?lessonId=${data.lesson?.id ?? ''}&mode=${chatMode}&context=lesson`
+	);
 
-	// BUG 1+4 fix: reset message history when mode transitions hint→explain so the
-	// backend exchange counter starts at 0 in explain mode (preventing tier skip).
+	// Reset message history on any mode change so the backend exchange counter
+	// starts fresh in the new mode (prevents tier skipping in either direction).
 	let prevChatMode = $state<'hint' | 'explain'>('hint');
 	$effect(() => {
 		const mode = chatMode;
-		if (prevChatMode === 'hint' && mode === 'explain') {
+		if (prevChatMode !== mode) {
 			chat.messages = [];
 			lastSeededQuery = null;
 		}
@@ -288,7 +296,13 @@
 		goto(data.nextLessonId ? resolve(`/lesson/${data.nextLessonId}`) : resolve('/learn'));
 	}
 
-	function openTutor(query: string) {
+	function openTutor(query: string, questionIndex?: number) {
+		// Clear history when switching to a different question so the new context
+		// starts fresh (different question = different mode + different seed query).
+		if (questionIndex !== undefined && questionIndex !== activeTutorQuestionIndex) {
+			chat.messages = [];
+			activeTutorQuestionIndex = questionIndex;
+		}
 		// BUG 2 fix: reset lastSeededQuery so the auto-seed effect fires again on re-open.
 		lastSeededQuery = null;
 		seedQuery = query;
@@ -390,6 +404,33 @@
 					action="?/submitLesson"
 					class="hidden"
 					aria-hidden="true"
+					use:enhance={() => {
+						submitting = true;
+						return async ({ result }) => {
+							submitting = false;
+							if (result.type === 'success' && result.data) {
+								const r = result.data.result as any;
+								const u = result.data.user as any;
+								// Sync user state immediately so the top bar updates.
+								if (u) {
+									userState.xp = u.xp;
+									userState.hearts = u.hearts;
+									userState.streak = u.streak;
+									userState.coins = u.coins;
+									userState.name = u.name || userState.name;
+									// Stat-change toasts are handled by the layout watcher reacting to
+									// the userState mutations above — no manual showToast needed here.
+								}
+								// Navigate in one step — no second click needed.
+								goto(
+									data.nextLessonId ? resolve(`/lesson/${data.nextLessonId}`) : resolve('/learn')
+								);
+							} else if (result.type === 'failure') {
+								const msg = (result.data as any)?.error ?? 'Submission failed.';
+								showToast(msg, 'error');
+							}
+						};
+					}}
 				>
 					<input type="hidden" name="selectedAnswers" value={JSON.stringify(selectedAnswers)} />
 					<input type="hidden" name="usedTutor" value={usedTutor ? '1' : '0'} />
@@ -422,7 +463,7 @@
 									{hasAttempted && result?.isCorrect ? 'text-success/70' : ''}
 									{hasAttempted && !result?.isCorrect ? 'text-error/70' : ''}
 									{!hasAttempted ? 'text-primary/50' : ''}"
-									onclick={() => openTutor(botQuery)}
+									onclick={() => openTutor(botQuery, questionIndex)}
 									aria-label="Ask Buddy about this question"><Bot size={16} /></button
 								>
 							</div>
@@ -519,109 +560,11 @@
 	<!-- Bottom Sheet / Action Area -->
 	<div
 		class="flex min-h-28 flex-col justify-center border-t border-base-200 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]
-        {submitted && isPerfect ? 'bg-success/10' : ''}
-        {submitted && !isPerfect ? 'bg-error/10' : ''}
-        {!submitted && allChecked && localIsPerfect ? 'bg-success/10' : ''}
-        {!submitted && allChecked && !localIsPerfect ? 'bg-error/10' : ''}
+        {allChecked && localIsPerfect ? 'bg-success/10' : ''}
+        {allChecked && !localIsPerfect ? 'bg-error/10' : ''}
     "
 	>
-		{#if submitted}
-			<div class="flex w-full flex-col gap-3">
-				<!-- Result header row -->
-				<div class="flex items-center justify-between">
-					<div class="flex items-center gap-2">
-						{#if isPerfect}
-							<CheckCircle class="text-success" size={32} />
-							<span class="text-xl font-bold text-success">Brilliant!</span>
-						{:else}
-							<XCircle class="text-error" size={32} />
-							<span class="text-xl font-bold text-error">Some answers need work</span>
-						{/if}
-					</div>
-
-					{#if !isPerfect}
-						<button
-							type="button"
-							class="btn min-h-10 rounded-full btn-outline btn-sm btn-secondary"
-							onclick={() => openTutor(tutorExplainQuery)}
-						>
-							<MessageCircleQuestion size={16} /> Explain it
-						</button>
-					{/if}
-				</div>
-
-				<!-- Reward badges -->
-				{#if isPerfect && (form?.result?.xpAwarded ?? 0) > 0}
-					<div class="flex flex-wrap gap-2">
-						{#if form?.result?.isRetryBonus}
-							<span class="badge badge-ghost badge-lg font-bold"
-								>+{form?.result?.xpAwarded ?? 0} XP (retry)</span
-							>
-						{:else}
-							<span class="badge badge-lg font-bold badge-primary"
-								>+{form?.result?.xpAwarded ?? 0} XP</span
-							>
-						{/if}
-						{#if (form?.result?.speedBonus ?? 0) > 0}
-							<span class="badge badge-ghost badge-lg"
-								>⚡ +{form?.result?.speedBonus ?? 0} speed</span
-							>
-						{/if}
-						{#if (form?.result?.independenceBonus ?? 0) > 0}
-							<span class="badge badge-ghost badge-lg"
-								>🎯 +{form?.result?.independenceBonus ?? 0} solo</span
-							>
-						{/if}
-						{#if (form?.result?.coinsAwarded ?? 0) > 0}
-							<span class="badge badge-lg badge-warning"
-								>+{form?.result?.coinsAwarded ?? 0} coins</span
-							>
-						{/if}
-					</div>
-				{/if}
-
-				<!-- Streak badge -->
-				{#if form?.result?.streakGained}
-					<div class="flex items-center gap-2">
-						<span class="badge badge-lg font-bold" style="background:#f97316;color:#fff;"
-							><Flame size={14} /> Streak x{form.result.newStreak}!</span
-						>
-					</div>
-				{/if}
-
-				<!-- Heart lost badge -->
-				{#if !isPerfect && form?.result?.heartLost}
-					<div class="flex items-center gap-2 text-sm">
-						<span class="badge badge-lg font-bold badge-error">-1 heart</span>
-						<span class="text-base-content/70">{form.result.heartsAfter} / 5 remaining</span>
-					</div>
-				{/if}
-
-				<!-- Action buttons -->
-				<div class="flex gap-3">
-					{#if !isPerfect}
-						<button
-							class="btn flex-1 rounded-full font-bold btn-outline btn-lg btn-error"
-							type="button"
-							onclick={() => goto(resolve(`/lesson/${data.lesson.id}`))}
-						>
-							Retry
-						</button>
-					{/if}
-					<button
-						class="btn rounded-full font-bold btn-lg
-                        {!isPerfect ? 'flex-1' : 'w-full'}
-                        {isPerfect
-							? 'text-success-content shadow-[0_4px_0_0_#16a34a] btn-success'
-							: 'text-error-content shadow-[0_4px_0_0_#dc2626] btn-error'}"
-						type="button"
-						onclick={continueLesson}
-					>
-						Continue <ArrowRight size={18} />
-					</button>
-				</div>
-			</div>
-		{:else if allChecked}
+		{#if allChecked}
 			<!-- All questions checked client-side — submit to server for XP / heart refill -->
 			<div class="flex w-full flex-col gap-4">
 				<div class="flex items-center justify-between">
@@ -653,8 +596,13 @@
 						: 'text-error-content shadow-[0_4px_0_0_#dc2626] btn-error'}"
 					type="submit"
 					form="submit-lesson-form"
+					disabled={submitting}
 				>
-					Continue <ArrowRight size={18} />
+					{#if submitting}
+						<span class="loading loading-sm loading-spinner"></span>
+					{:else}
+						Continue <ArrowRight size={18} />
+					{/if}
 				</button>
 			</div>
 		{:else}
