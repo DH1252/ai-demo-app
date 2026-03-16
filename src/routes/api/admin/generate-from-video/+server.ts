@@ -344,6 +344,21 @@ function containsVideoReferences(payload: ResponsePayload): boolean {
 	});
 }
 
+function shuffleOptions(question: z.infer<typeof questionSchema>): z.infer<typeof questionSchema> {
+	const correctText = question.options[question.correctOptionIndex];
+	const shuffled = [...question.options];
+	// Fisher-Yates shuffle
+	for (let i = shuffled.length - 1; i > 0; i--) {
+		const j = Math.floor(Math.random() * (i + 1));
+		[shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+	}
+	return {
+		...question,
+		options: shuffled,
+		correctOptionIndex: shuffled.indexOf(correctText)
+	};
+}
+
 export const POST: RequestHandler = async ({ request }) => {
 	const encoder = new TextEncoder();
 
@@ -669,7 +684,8 @@ export const POST: RequestHandler = async ({ request }) => {
 				}
 
 				// ── Done ──
-				const finalQuestions = validated.data.questions.slice(0, questionCount);
+				const finalQuestions = validated.data.questions.slice(0, questionCount).map(shuffleOptions);
+
 				log(
 					`All checks passed. Returning ${finalQuestions.length} question${finalQuestions.length === 1 ? '' : 's'}.`,
 					98,

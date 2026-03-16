@@ -28,6 +28,13 @@ const openai = createOpenAI({
 	}
 });
 
+/** Converts a raw second value into a MM:SS display string (e.g. 155 → "2:35"). */
+function formatTimestamp(seconds: number): string {
+	const m = Math.floor(seconds / 60);
+	const s = Math.floor(seconds % 60);
+	return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
 export const POST: RequestHandler = async ({ request, locals }) => {
 	if (!locals.user) {
 		return new Response('Unauthorized', { status: 401 });
@@ -57,6 +64,9 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 	const lessonId = reqUrl.searchParams.get('lessonId');
 	const rawMode = reqUrl.searchParams.get('mode');
 	const tutorMode: 'hint' | 'explain' = rawMode === 'explain' ? 'explain' : 'hint';
+	// 'lesson' = in-question panel inside a lesson; anything else = standalone /tutor page.
+	const tutorContext: 'lesson' | 'tutor' =
+		reqUrl.searchParams.get('context') === 'lesson' ? 'lesson' : 'tutor';
 
 	// Find the last message sent by the user (role check prevents picking up assistant messages).
 	const lastUserMessageObj = [...cappedMessages]
@@ -89,10 +99,10 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 	if (lessonContext.length > 0) {
 		lessonString = '### RELEVANT LESSON VIDEO CONTEXT ###\n';
 		for (const chunk of lessonContext) {
-			lessonString += `[Timestamp: ${chunk.startTime}s - ${chunk.endTime}s]: ${chunk.chunkText}\n`;
+			lessonString += `[Timestamp: ${formatTimestamp(chunk.startTime ?? 0)} - ${formatTimestamp(chunk.endTime ?? 0)}]: ${chunk.chunkText}\n`;
 		}
 		lessonString +=
-			'\n*Instruction: If you use the lesson context above to answer, ALWAYS boldly cite the exact video timestamp so the student knows where to re-watch!*\n\n';
+			'\n*Instruction: If you use the lesson context above to answer, ALWAYS boldly cite the exact video timestamp in MM:SS format (e.g. **2:35**) so the student knows where to re-watch!*\n\n';
 	}
 
 	// Format Student Profile + Quirks
@@ -106,12 +116,36 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 		memoryString += '\n';
 	}
 
-	// Count prior assistant turns to drive explain-mode escalation tiers.
+	// Count prior assistant turns to drive explain-mode escalation tiers (tutor context only).
 	const assistantTurnCount = cappedMessages.filter((m) => (m as any).role === 'assistant').length;
 	const nextExchange = assistantTurnCount + 1;
 
 	let modeBlock: string;
-	if (tutorMode === 'explain') {
+
+	if (tutorMode === 'hint') {
+		// ── Hint mode (both contexts) ─────────────────────────────────────────
+		// Never reveal the answer. Guide the student with questions and nudges.
+		modeBlock = `
+TUTORING MODE: HINT ONLY
+- Never reveal the correct answer directly, even if the student explicitly asks for it.
+- Use only guiding questions and small nudges to lead the student toward the answer themselves.
+- If the student is stuck, rephrase the question or offer a smaller hint — never the answer.`;
+	} else if (tutorContext === 'lesson') {
+		// ── Lesson in-question explain mode ──────────────────────────────────
+		// Student has already answered (correctly or after exhausting attempts).
+		// Give the full explanation immediately — no gating, no tiers.
+		modeBlock = `
+TUTORING MODE: FULL EXPLANATION
+The student has finished attempting this question and wants a complete understanding.
+- Immediately give a clear, thorough explanation of the concept being tested.
+- State the correct answer and explain exactly why it is correct.
+- Explain why the other options are incorrect (if multiple choice).
+- Connect the concept to the broader lesson topic so it sticks.
+- Keep it focused and digestible — thorough does not mean exhaustive.`;
+	} else {
+		// ── Standalone tutor explain mode (progressive tiers) ─────────────────
+		// Student is struggling and has been escalated from hint mode.
+		// Reveal detail gradually across exchanges to keep them engaged.
 		let tier: string;
 		if (nextExchange <= 2) {
 			tier =
@@ -123,14 +157,10 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 			tier =
 				'Give a complete explanation including the correct answer and full reasoning. Be thorough and clear.';
 		}
-		modeBlock = `\nTUTORING MODE: PROGRESSIVE EXPLAIN (exchange ${nextExchange})
+		modeBlock = `
+TUTORING MODE: PROGRESSIVE EXPLAIN (exchange ${nextExchange})
 The student answered a question incorrectly and needs help. Escalate detail gradually.
-Current tier instruction: ${tier}\n`;
-	} else {
-		modeBlock = `\nTUTORING MODE: HINT ONLY
-- Never reveal the correct answer directly, even if the student explicitly asks for it.
-- Use only guiding questions and small nudges to lead the student toward the answer themselves.
-- If the student is stuck, rephrase the question or offer a smaller hint — never the answer.\n`;
+Current tier instruction: ${tier}`;
 	}
 
 	// Sanitize display name to prevent prompt injection via crafted usernames.
