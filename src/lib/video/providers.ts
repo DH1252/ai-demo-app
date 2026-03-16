@@ -6,6 +6,7 @@ export type VideoProvider = {
 	inputExample: string;
 	supportedHosts: readonly string[];
 	frameSources: readonly string[];
+	imageSources: readonly string[];
 	canEmbed: boolean;
 	canGenerateFromUrl: boolean;
 	toEmbedUrl: (parsedUrl: URL) => string | null;
@@ -55,6 +56,7 @@ export const VIDEO_PROVIDERS = [
 		inputExample: 'https://www.youtube.com/watch?v=...',
 		supportedHosts: ['youtu.be', 'youtube.com', 'm.youtube.com', 'youtube-nocookie.com'],
 		frameSources: ['https://www.youtube-nocookie.com'],
+		imageSources: ['https://i.ytimg.com', 'https://img.youtube.com'],
 		canEmbed: true,
 		canGenerateFromUrl: true,
 		toEmbedUrl(parsedUrl: URL): string | null {
@@ -66,6 +68,9 @@ export const VIDEO_PROVIDERS = [
 
 export const VIDEO_FRAME_SOURCES = uniqueSources(
 	VIDEO_PROVIDERS.flatMap((provider) => provider.frameSources)
+);
+export const VIDEO_IMAGE_SOURCES = uniqueSources(
+	VIDEO_PROVIDERS.flatMap((provider) => provider.imageSources)
 );
 
 export const SUPPORTED_VIDEO_INPUT_EXAMPLES = VIDEO_PROVIDERS.map(

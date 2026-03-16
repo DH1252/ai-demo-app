@@ -2,14 +2,14 @@ import { validateSessionToken } from '$lib/server/auth';
 import { redirect } from '@sveltejs/kit';
 import type { Handle } from '@sveltejs/kit';
 import { hasOnboardingProfileMemory } from '$lib/server/learningPaths';
-import { VIDEO_FRAME_SOURCES } from '$lib/video/providers';
+import { VIDEO_FRAME_SOURCES, VIDEO_IMAGE_SOURCES } from '$lib/video/providers';
 
 function buildContentSecurityPolicy(): string {
 	const directives = {
 		'default-src': ["'self'"],
 		'script-src': ["'self'", "'unsafe-inline'"],
 		'style-src': ["'self'", "'unsafe-inline'"],
-		'img-src': ["'self'", 'data:', 'blob:'],
+		'img-src': ["'self'", 'data:', 'blob:', ...VIDEO_IMAGE_SOURCES],
 		'connect-src': ["'self'"],
 		'font-src': ["'self'", 'data:'],
 		'frame-src': VIDEO_FRAME_SOURCES
