@@ -3,6 +3,7 @@
 	import favicon from '$lib/assets/favicon.svg';
 	import { userState, initializeState, syncState } from '$lib/state/user.svelte';
 	import { showToast } from '$lib/state/toast.svelte';
+	import { rankFromXp } from '$lib/rank';
 	import ToastContainer from '$lib/ToastContainer.svelte';
 	import { Heart, Flame, Coins, Zap, Home, BookOpen, Bot, User } from 'lucide-svelte';
 	import { page } from '$app/state';
@@ -69,6 +70,12 @@
 		if (xp !== prevXp) {
 			const d = xp - prevXp;
 			showToast(d > 0 ? `+${d} XP` : `${d} XP`, d > 0 ? 'success' : 'warning');
+			// Check for rank-up — compare tier before and after the XP change.
+			const oldRank = rankFromXp(prevXp);
+			const newRank = rankFromXp(xp);
+			if (d > 0 && newRank !== oldRank) {
+				showToast(`⬆️ Rank up: ${newRank}!`, 'success');
+			}
 			prevXp = xp;
 		}
 		if (hearts !== prevHearts) {
@@ -77,6 +84,10 @@
 				d > 0 ? `+${d} heart restored` : `${Math.abs(d)} heart lost`,
 				d > 0 ? 'success' : 'error'
 			);
+			// Extra warning when hearts hit zero — tells the student what to do next.
+			if (d < 0 && hearts === 0) {
+				showToast('💔 Out of hearts! Regen in 30 min or spend coins.', 'error');
+			}
 			prevHearts = hearts;
 		}
 		if (coins !== prevCoins) {
@@ -141,9 +152,12 @@
 					<span>{userState.coins}</span>
 				</div>
 
-				<!-- Hearts -->
+				<!-- Hearts — pulses red and flips to error colours when empty -->
 				<div
-					class="flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-full bg-red-50 px-2 py-1.5 text-sm font-bold text-red-500 ring-1 ring-red-100"
+					class="flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-full px-2 py-1.5 text-sm font-bold ring-1 transition-colors
+						{userState.hearts === 0
+						? 'animate-pulse bg-error/10 text-error ring-error/40'
+						: 'bg-red-50 text-red-500 ring-red-100'}"
 				>
 					<Heart size={15} fill={userState.hearts > 0 ? 'currentColor' : 'none'} />
 					<span>{userState.hearts}</span>
@@ -175,17 +189,7 @@
 							></span>
 						{/if}
 
-						{#if item.label === 'Tutor' && userState.hearts < userState.maxHearts}
-							<div class="relative">
-								<span
-									class="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-error text-[9px] font-extrabold text-white ring-2 ring-base-100"
-									aria-label="{userState.hearts} hearts remaining">{userState.hearts}</span
-								>
-								<item.icon size={22} />
-							</div>
-						{:else}
-							<item.icon size={22} />
-						{/if}
+						<item.icon size={22} />
 
 						<span>{item.label}</span>
 					</a>

@@ -1,7 +1,16 @@
 <script lang="ts">
 	import type { ActionData, PageData } from './$types';
-	import { Check, BookOpen, BrainCircuit, Lock, PlayCircle, ChevronRight } from 'lucide-svelte';
+	import {
+		Check,
+		BookOpen,
+		BrainCircuit,
+		Lock,
+		PlayCircle,
+		ChevronRight,
+		Heart
+	} from 'lucide-svelte';
 	import { resolve } from '$app/paths';
+	import { userState } from '$lib/state/user.svelte';
 
 	let { data, form } = $props() as { data: PageData; form: ActionData };
 
@@ -30,6 +39,20 @@
 	{#if form?.success}
 		<div class="mb-4 alert text-sm alert-success" role="status" aria-live="polite">
 			{form.success}
+		</div>
+	{/if}
+
+	<!-- No-hearts warning — shown reactively using client state, no server round-trip needed -->
+	{#if userState.statsReady && userState.hearts === 0}
+		<div
+			class="mb-4 flex items-start gap-3 rounded-2xl border border-error/20 bg-error/5 px-4 py-3"
+			role="alert"
+		>
+			<Heart size={18} class="mt-0.5 shrink-0 text-error" />
+			<p class="text-sm font-medium text-error">
+				You're out of hearts. Hearts regenerate every 30 min — or open a lesson to spend coins for
+				an instant restore.
+			</p>
 		</div>
 	{/if}
 
