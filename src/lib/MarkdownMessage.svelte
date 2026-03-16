@@ -1,5 +1,6 @@
 <script lang="ts" module>
 	import { marked } from 'marked';
+	import markedKatex from 'marked-katex-extension';
 
 	// Singleton renderer — created once per module, not once per component mount.
 	const renderer = new marked.Renderer();
@@ -7,6 +8,10 @@
 		const titleAttr = title ? ` title="${title}"` : '';
 		return `<a href="${href}" target="_blank" rel="noopener noreferrer"${titleAttr}>${linkText}</a>`;
 	};
+
+	// KaTeX extension: renders $inline$ and $$block$$ LaTeX.
+	// throwOnError: false keeps the page alive if the model emits malformed math.
+	marked.use(markedKatex({ throwOnError: false, output: 'html' }));
 </script>
 
 <script lang="ts">
