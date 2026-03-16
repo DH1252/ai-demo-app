@@ -1,37 +1,48 @@
 <script lang="ts">
-	import { Send, Sparkles, User as UserIcon, Loader2, Bot, AlertCircle } from 'lucide-svelte';
+	import {
+		Send,
+		Sparkles,
+		User as UserIcon,
+		Loader2,
+		Bot,
+		AlertCircle,
+		Trash2
+	} from 'lucide-svelte';
 	import { Chat } from '@ai-sdk/svelte';
 	import { DefaultChatTransport } from 'ai';
 	import { page } from '$app/state';
 	import type { PageData } from './$types';
 	import MarkdownMessage from '$lib/MarkdownMessage.svelte';
+	import { tutorChatState, clearTutorChat } from '$lib/state/tutorChat.svelte';
 
 	let { data } = $props() as { data: PageData };
 
 	let q = $derived(page.url.searchParams.get('q'));
 	let lessonId = $derived(page.url.searchParams.get('lessonId'));
 
-	// Mode starts from URL param (so lesson pages can deep-link with ?mode=explain), else hint.
+	// Mode persisted in module state. URL param can override on first load
+	// (so lesson pages can deep-link with ?mode=explain).
 	const urlMode = page.url.searchParams.get('mode');
-	let chatMode = $state<'hint' | 'explain'>(urlMode === 'explain' ? 'explain' : 'hint');
+	if (urlMode === 'explain' && tutorChatState.chatMode !== 'explain') {
+		tutorChatState.chatMode = 'explain';
+	}
 
 	let chatApi = $derived(
 		lessonId
-			? `/api/ai/tutor?lessonId=${lessonId}&mode=${chatMode}`
-			: `/api/ai/tutor?mode=${chatMode}`
+			? `/api/ai/tutor?lessonId=${lessonId}&mode=${tutorChatState.chatMode}`
+			: `/api/ai/tutor?mode=${tutorChatState.chatMode}`
 	);
 
 	// Auto-escalate: after 3 exchanges in hint mode the student is clearly struggling —
 	// switch to explain mode so the backend starts its progressive-reveal tiers.
 	// We keep the full message history so the backend has conversation context.
 	const HINT_ESCALATION_THRESHOLD = 3;
-	let didEscalate = $state(false);
 	$effect(() => {
-		if (chatMode !== 'hint') return;
+		if (tutorChatState.chatMode !== 'hint') return;
 		const assistantTurns = chat.messages.filter((m) => m.role === 'assistant').length;
 		if (assistantTurns >= HINT_ESCALATION_THRESHOLD) {
-			chatMode = 'explain';
-			didEscalate = true;
+			tutorChatState.chatMode = 'explain';
+			tutorChatState.didEscalate = true;
 		}
 	});
 
@@ -40,6 +51,8 @@
 	// once during destructuring.  Using `prepareSendMessagesRequest` is the correct way to
 	// supply a dynamic URL because it is called on every outgoing request.
 	const chat = new Chat({
+		// Seed with persisted messages so history survives client-side navigation.
+		messages: tutorChatState.messages,
 		transport: new DefaultChatTransport({
 			prepareSendMessagesRequest: (opts) => ({
 				api: chatApi,
@@ -54,7 +67,18 @@
 		})
 	});
 
+	// Keep module state in sync so the next mount picks up the latest messages.
+	$effect(() => {
+		tutorChatState.messages = chat.messages;
+	});
+
 	let lastSeededPromptSent = $state<string | null>(null);
+
+	function handleClear() {
+		chat.messages = [];
+		lastSeededPromptSent = null;
+		clearTutorChat();
+	}
 
 	$effect(() => {
 		const seededPrompt = q?.trim();
@@ -140,13 +164,25 @@
 				<h1 class="text-lg leading-tight font-bold">Buddy AI</h1>
 				<p class="text-xs opacity-90">Your Smart Tutor</p>
 			</div>
-			{#if chatMode === 'explain'}
+			{#if tutorChatState.chatMode === 'explain'}
 				<span class="badge border-0 bg-white/20 badge-sm text-primary-content">Explain Mode</span>
 			{:else}
 				<span class="badge border-0 bg-white/20 badge-sm text-primary-content">Hint Mode</span>
 			{/if}
 		</div>
-		<Sparkles size={20} />
+		<div class="flex items-center gap-2">
+			{#if chat.messages.length > 0}
+				<button
+					class="btn btn-circle text-primary-content/70 btn-ghost btn-sm hover:bg-white/20 hover:text-primary-content"
+					onclick={handleClear}
+					title="Clear chat"
+					aria-label="Clear chat history"
+				>
+					<Trash2 size={16} />
+				</button>
+			{/if}
+			<Sparkles size={20} />
+		</div>
 	</div>
 
 	<div
@@ -269,7 +305,7 @@
 			</div>
 		{/if}
 
-		{#if didEscalate}
+		{#if tutorChatState.didEscalate}
 			<div class="flex items-center gap-2 py-1 text-xs text-base-content/40">
 				<div class="h-px flex-1 bg-base-300"></div>
 				<span class="shrink-0 font-semibold">Switched to Explain Mode</span>
