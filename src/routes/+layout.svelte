@@ -8,6 +8,7 @@
 	import { Heart, Flame, Coins, Zap, Home, BookOpen, Bot, User } from 'lucide-svelte';
 	import { page } from '$app/state';
 	import { base } from '$app/paths';
+	import { onMount } from 'svelte';
 
 	let { data, children } = $props();
 
@@ -30,9 +31,11 @@
 		}
 	});
 
-	// Refresh client state from the server on mount (picks up any server-side
+	// Refresh client state from the server on mount only (picks up any server-side
 	// changes — e.g. streak updates — that happened outside this session).
-	$effect(() => {
+	// Using onMount instead of $effect prevents an extra DB round-trip on every
+	// client-side navigation, since $effect re-runs whenever data.user changes.
+	onMount(() => {
 		if (data.user) {
 			syncState();
 		}

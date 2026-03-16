@@ -19,6 +19,11 @@ import { isAiDebugEnabled } from '$lib/server/ai/debugState';
 import type { RequestHandler } from './$types';
 import type { UIMessage } from 'ai';
 
+/** Narrows an unknown message object to one with a matching `role` string. */
+function hasRole<R extends string>(m: unknown, role: R): m is { role: R } {
+	return typeof m === 'object' && m !== null && (m as Record<string, unknown>).role === role;
+}
+
 const openai = createOpenAI({
 	baseURL: (env.OPENAI_BASE_URL || 'https://integrate.api.nvidia.com/v1').replace(/\/$/, ''),
 	get apiKey() {
@@ -69,9 +74,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 		reqUrl.searchParams.get('context') === 'lesson' ? 'lesson' : 'tutor';
 
 	// Find the last message sent by the user (role check prevents picking up assistant messages).
-	const lastUserMessageObj = [...cappedMessages]
-		.reverse()
-		.find((m) => (m as any).role === 'user') as
+	const lastUserMessageObj = [...cappedMessages].reverse().find((m) => hasRole(m, 'user')) as
 		| { role: string; content?: unknown; parts?: Array<{ type?: string; text?: string }> }
 		| undefined;
 
@@ -117,7 +120,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 	}
 
 	// Count prior assistant turns to drive explain-mode escalation tiers (tutor context only).
-	const assistantTurnCount = cappedMessages.filter((m) => (m as any).role === 'assistant').length;
+	const assistantTurnCount = cappedMessages.filter((m) => hasRole(m, 'assistant')).length;
 	const nextExchange = assistantTurnCount + 1;
 
 	let modeBlock: string;

@@ -17,9 +17,20 @@ function isAiRateLimited(userId: string): boolean {
 	const now = Date.now();
 	const windowStart = now - AI_RATE_WINDOW_MS;
 	const timestamps = (aiRequestLog.get(userId) ?? []).filter((t) => t > windowStart);
-	if (timestamps.length >= AI_RATE_LIMIT) return true;
+	if (timestamps.length >= AI_RATE_LIMIT) {
+		// Persist the pruned list so it doesn't grow with stale entries.
+		aiRequestLog.set(userId, timestamps);
+		return true;
+	}
 	timestamps.push(now);
-	aiRequestLog.set(userId, timestamps);
+	// Only retain the entry while it has timestamps within the window.
+	// Once all timestamps age out the entry is evicted to prevent memory growth
+	// in long-running processes with many unique users.
+	if (timestamps.length > 0) {
+		aiRequestLog.set(userId, timestamps);
+	} else {
+		aiRequestLog.delete(userId);
+	}
 	return false;
 }
 
@@ -123,6 +134,11 @@ export const handle: Handle = async ({ event, resolve }) => {
 	response.headers.set('X-Frame-Options', 'SAMEORIGIN');
 	response.headers.set('X-Content-Type-Options', 'nosniff');
 	response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+	// CSP: unsafe-inline required for SvelteKit hydration scripts and KaTeX inline styles.
+	response.headers.set(
+		'Content-Security-Policy',
+		"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:;"
+	);
 
 	return response;
 };

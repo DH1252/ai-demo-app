@@ -1,4 +1,11 @@
-import { integer, sqliteTable, text, customType, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import {
+	integer,
+	sqliteTable,
+	text,
+	customType,
+	uniqueIndex,
+	index
+} from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
 
 const vector = customType<{ data: number[]; driverData: any }>({
@@ -78,29 +85,37 @@ export const userProgress = sqliteTable(
 	(table) => [uniqueIndex('user_progress_user_lesson_idx').on(table.userId, table.lessonId)]
 );
 
-export const studentMemories = sqliteTable('student_memories', {
-	id: text('id')
-		.primaryKey()
-		.$defaultFn(() => crypto.randomUUID()),
-	userId: text('user_id')
-		.notNull()
-		.references(() => users.id),
-	memoryText: text('memory_text').notNull(),
-	embedding: vector('embedding')
-});
+export const studentMemories = sqliteTable(
+	'student_memories',
+	{
+		id: text('id')
+			.primaryKey()
+			.$defaultFn(() => crypto.randomUUID()),
+		userId: text('user_id')
+			.notNull()
+			.references(() => users.id),
+		memoryText: text('memory_text').notNull(),
+		embedding: vector('embedding')
+	},
+	(table) => [index('student_memories_user_idx').on(table.userId)]
+);
 
-export const lessonChunks = sqliteTable('lesson_chunks', {
-	id: text('id')
-		.primaryKey()
-		.$defaultFn(() => crypto.randomUUID()),
-	lessonId: text('lesson_id')
-		.notNull()
-		.references(() => lessons.id),
-	chunkText: text('chunk_text').notNull(),
-	startTime: integer('start_time'),
-	endTime: integer('end_time'),
-	embedding: vector('embedding')
-});
+export const lessonChunks = sqliteTable(
+	'lesson_chunks',
+	{
+		id: text('id')
+			.primaryKey()
+			.$defaultFn(() => crypto.randomUUID()),
+		lessonId: text('lesson_id')
+			.notNull()
+			.references(() => lessons.id),
+		chunkText: text('chunk_text').notNull(),
+		startTime: integer('start_time'),
+		endTime: integer('end_time'),
+		embedding: vector('embedding')
+	},
+	(table) => [index('lesson_chunks_lesson_idx').on(table.lessonId)]
+);
 
 export const learningPaths = sqliteTable('learning_paths', {
 	id: text('id')

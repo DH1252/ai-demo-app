@@ -417,52 +417,76 @@ export const actions = {
 		}
 		const userId = locals.user.id;
 
-		const userRows = await db
-			.select({
-				hearts: users.hearts,
-				coins: users.coins,
-				heartsLastUpdated: users.heartsLastUpdated
-			})
-			.from(users)
-			.where(eq(users.id, userId))
-			.limit(1);
+		// Wrap the entire read-check-write sequence in a transaction so that
+		// concurrent requests cannot both pass the coins/hearts check before
+		// either write commits (TOCTOU race condition).
+		let updatedUser: {
+			xp: number;
+			streak: number;
+			hearts: number;
+			coins: number;
+			name: string;
+		} | null = null;
 
-		const u = userRows[0];
-		if (!u) return fail(404, { error: 'User not found.' });
+		try {
+			await db.transaction(async (tx) => {
+				const userRows = await tx
+					.select({
+						hearts: users.hearts,
+						coins: users.coins,
+						heartsLastUpdated: users.heartsLastUpdated
+					})
+					.from(users)
+					.where(eq(users.id, userId))
+					.limit(1);
 
-		// Apply regen before checking to get the true current hearts.
-		const regen = computeRegenHearts(u.hearts, u.heartsLastUpdated);
-		const currentHearts = regen.hearts;
+				const u = userRows[0];
+				if (!u) throw Object.assign(new Error('User not found.'), { status: 404 });
 
-		if (currentHearts >= 5) {
-			return fail(400, { error: 'Hearts are already full.' });
+				// Apply any pending passive regen to get the true current hearts.
+				const regen = computeRegenHearts(u.hearts, u.heartsLastUpdated);
+				const currentHearts = regen.hearts;
+
+				if (currentHearts >= 5) {
+					throw Object.assign(new Error('Hearts are already full.'), { status: 400 });
+				}
+				if (u.coins < 5) {
+					throw Object.assign(new Error('Not enough coins. You need 5 coins to restore a heart.'), {
+						status: 400
+					});
+				}
+
+				const nowIso = new Date().toISOString();
+				await tx
+					.update(users)
+					.set({
+						hearts: currentHearts + 1,
+						coins: sql`${users.coins} - 5`,
+						heartsLastUpdated: nowIso
+					})
+					.where(eq(users.id, userId));
+
+				// Read the committed result inside the transaction for a consistent snapshot.
+				const updatedRows = await tx
+					.select({
+						xp: users.xp,
+						streak: users.streak,
+						hearts: users.hearts,
+						coins: users.coins,
+						name: users.name
+					})
+					.from(users)
+					.where(eq(users.id, userId))
+					.limit(1);
+
+				updatedUser = updatedRows[0] ?? null;
+			});
+		} catch (e: unknown) {
+			const err = e as { message?: string; status?: number };
+			const status = err.status === 400 ? 400 : err.status === 404 ? 404 : 500;
+			return fail(status, { error: err.message ?? 'Failed to buy heart.' });
 		}
-		if (u.coins < 5) {
-			return fail(400, { error: 'Not enough coins. You need 5 coins to restore a heart.' });
-		}
 
-		const nowIso = new Date().toISOString();
-		await db
-			.update(users)
-			.set({
-				hearts: currentHearts + 1,
-				coins: sql`${users.coins} - 5`,
-				heartsLastUpdated: nowIso
-			})
-			.where(eq(users.id, userId));
-
-		const updatedRows = await db
-			.select({
-				xp: users.xp,
-				streak: users.streak,
-				hearts: users.hearts,
-				coins: users.coins,
-				name: users.name
-			})
-			.from(users)
-			.where(eq(users.id, userId))
-			.limit(1);
-
-		return { user: updatedRows[0] ?? null };
+		return { user: updatedUser };
 	}
 } satisfies Actions;
