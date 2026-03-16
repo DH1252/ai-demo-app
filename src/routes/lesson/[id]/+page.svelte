@@ -19,6 +19,7 @@
 	import type { ActionData, PageData } from './$types';
 	import { Chat } from '@ai-sdk/svelte';
 	import { DefaultChatTransport } from 'ai';
+	import { fly } from 'svelte/transition';
 	import MarkdownMessage from '$lib/MarkdownMessage.svelte';
 	import { showToast } from '$lib/state/toast.svelte';
 	import { normalizeVideoEmbedUrl } from '$lib/video/providers';
@@ -57,8 +58,20 @@
 		}
 	}
 
+	type PersistedAttemptState = {
+		selectedAnswers: string[];
+		checkedQuestions: boolean[];
+		updatedAt: string;
+	};
+
 	let selectedAnswersLocal = $state<string[]>([]);
 	let checkedQuestions = $state<boolean[]>([]);
+	let isSavingAttempt = $state(false);
+	let isResettingAttempt = $state(false);
+	let hasHydratedAttemptState = $state(false);
+	let lastSavedAttemptSnapshot = $state('');
+	let saveAttemptTimer = $state<ReturnType<typeof setTimeout> | null>(null);
+	let pendingAttemptSnapshot = $state('');
 
 	let overrideVideoUrl = $state<string | null>(null);
 	let currentVideoUrl = $derived(
@@ -87,6 +100,10 @@
 	let iframeSrc = $derived(currentVideoUrl ? normalizeVideoEmbedUrl(currentVideoUrl) : null);
 
 	const questions = $derived(parseQuestions(data.lesson?.contentData ?? ''));
+	const persistedAttemptState = $derived(
+		data.persistedAttemptState as PersistedAttemptState | null
+	);
+	const canResetAttempt = $derived(Boolean(data.attemptLifecycle?.canReset));
 	const selectedAnswers = $derived(
 		selectedAnswersLocal.length === questions.length
 			? selectedAnswersLocal
@@ -134,6 +151,208 @@
 		return Math.round((checkedCount / questions.length) * 100);
 	});
 
+	let activeQuestionIndex = $state(0);
+	let questionSlideDirection = $state<'forward' | 'backward'>('forward');
+	let sliderRenderKey = $state(0);
+
+	const activeQuestion = $derived(questions[activeQuestionIndex] ?? null);
+	const activeQuestionChecked = $derived(
+		activeQuestionIndex >= 0 && checkedQuestions[activeQuestionIndex] === true
+	);
+	const activeQuestionResult = $derived(questionResults[activeQuestionIndex] ?? null);
+	const activeQuestionHasSelection = $derived(
+		(selectedAnswers[activeQuestionIndex] ?? '').trim() !== ''
+	);
+	const optionLabels = ['A', 'B', 'C', 'D', 'E', 'F'];
+	const canGoToPreviousQuestion = $derived(activeQuestionIndex > 0);
+	const canGoToNextQuestion = $derived(activeQuestionIndex < questions.length - 1);
+	const activeQuestionPrompt = $derived(
+		activeQuestion
+			? `Question ${activeQuestionIndex + 1} of ${questions.length}`
+			: 'No question selected'
+	);
+	const sliderTransitionX = $derived(questionSlideDirection === 'forward' ? 56 : -56);
+	function buildAttemptSnapshot(): string {
+		return JSON.stringify({
+			selectedAnswers: Array.from(
+				{ length: questions.length },
+				(_, index) => selectedAnswersLocal[index] ?? ''
+			),
+			checkedQuestions: Array.from(
+				{ length: questions.length },
+				(_, index) => checkedQuestions[index] === true
+			)
+		});
+	}
+
+	$effect(() => {
+		if (questions.length === 0) {
+			activeQuestionIndex = 0;
+			return;
+		}
+
+		if (activeQuestionIndex > questions.length - 1) {
+			activeQuestionIndex = questions.length - 1;
+		}
+	});
+
+	$effect(() => {
+		if (hasHydratedAttemptState || questions.length === 0) return;
+
+		const restored = persistedAttemptState;
+		if (restored) {
+			selectedAnswersLocal = Array.from(
+				{ length: questions.length },
+				(_, index) => restored.selectedAnswers[index] ?? ''
+			);
+			checkedQuestions = Array.from(
+				{ length: questions.length },
+				(_, index) => restored.checkedQuestions[index] === true
+			);
+			const firstUncheckedIndex = Array.from(
+				{ length: questions.length },
+				(_, index) => index
+			).find((index) => restored.checkedQuestions[index] !== true);
+			if (firstUncheckedIndex !== undefined) {
+				activeQuestionIndex = firstUncheckedIndex;
+			}
+		}
+
+		hasHydratedAttemptState = true;
+		lastSavedAttemptSnapshot = buildAttemptSnapshot();
+	});
+
+	$effect(() => {
+		return () => {
+			if (saveAttemptTimer) {
+				clearTimeout(saveAttemptTimer);
+			}
+		};
+	});
+
+	async function flushAttemptSave(snapshot: string): Promise<void> {
+		if (!hasHydratedAttemptState || submitted || questions.length === 0) return;
+		if (snapshot === lastSavedAttemptSnapshot || isSavingAttempt) return;
+
+		isSavingAttempt = true;
+		try {
+			const payload = JSON.parse(snapshot) as {
+				selectedAnswers: string[];
+				checkedQuestions: boolean[];
+			};
+			const response = await fetch(resolve(`/api/lesson/${data.lesson.id}/attempt`), {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					action: 'save',
+					selectedAnswers: payload.selectedAnswers,
+					checkedQuestions: payload.checkedQuestions
+				})
+			});
+
+			if (response.ok) {
+				lastSavedAttemptSnapshot = snapshot;
+			}
+		} catch {
+			// Best-effort autosave — the user can continue even if persistence hiccups.
+		} finally {
+			isSavingAttempt = false;
+
+			if (pendingAttemptSnapshot && pendingAttemptSnapshot !== lastSavedAttemptSnapshot) {
+				const nextSnapshot = pendingAttemptSnapshot;
+				pendingAttemptSnapshot = '';
+				void flushAttemptSave(nextSnapshot);
+			}
+		}
+	}
+
+	function queueAttemptSave(): void {
+		if (!hasHydratedAttemptState || submitted || questions.length === 0) return;
+
+		const snapshot = buildAttemptSnapshot();
+		if (snapshot === lastSavedAttemptSnapshot) return;
+
+		pendingAttemptSnapshot = snapshot;
+
+		if (saveAttemptTimer) {
+			clearTimeout(saveAttemptTimer);
+		}
+
+		saveAttemptTimer = setTimeout(() => {
+			saveAttemptTimer = null;
+			const nextSnapshot = pendingAttemptSnapshot;
+			pendingAttemptSnapshot = '';
+			if (!nextSnapshot) return;
+			void flushAttemptSave(nextSnapshot);
+		}, 350);
+	}
+
+	function goToQuestion(nextIndex: number): void {
+		if (nextIndex < 0 || nextIndex >= questions.length || nextIndex === activeQuestionIndex) return;
+		questionSlideDirection = nextIndex > activeQuestionIndex ? 'forward' : 'backward';
+		activeQuestionIndex = nextIndex;
+		sliderRenderKey += 1;
+	}
+
+	function goToNextQuestion(): void {
+		goToQuestion(activeQuestionIndex + 1);
+	}
+
+	function goToPreviousQuestion(): void {
+		goToQuestion(activeQuestionIndex - 1);
+	}
+
+	function selectAnswer(questionIndex: number, answerId: string): void {
+		if (checkedQuestions[questionIndex] || submitted) return;
+		const next = [...selectedAnswersLocal];
+		next[questionIndex] = answerId;
+		selectedAnswersLocal = next;
+		queueAttemptSave();
+	}
+
+	function checkAnswer(questionIndex: number): void {
+		if (!(selectedAnswers[questionIndex] ?? '').trim()) return;
+		const next = [...checkedQuestions];
+		next[questionIndex] = true;
+		checkedQuestions = next;
+		queueAttemptSave();
+	}
+
+	async function resetCompletedAttempt(): Promise<void> {
+		if (!canResetAttempt || isResettingAttempt) return;
+
+		try {
+			isResettingAttempt = true;
+			const response = await fetch(resolve(`/api/lesson/${data.lesson.id}/attempt`), {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ action: 'reset' })
+			});
+
+			if (!response.ok) {
+				const body = (await response
+					.json()
+					.catch(() => ({ error: 'Failed to reset lesson attempt.' }))) as {
+					error?: string;
+				};
+				showToast(body.error ?? 'Failed to reset lesson attempt.', 'error');
+				return;
+			}
+
+			selectedAnswersLocal = Array.from({ length: questions.length }, () => '');
+			checkedQuestions = Array.from({ length: questions.length }, () => false);
+			activeQuestionIndex = 0;
+			lastSavedAttemptSnapshot = JSON.stringify({
+				selectedAnswers: Array.from({ length: questions.length }, () => ''),
+				checkedQuestions: Array.from({ length: questions.length }, () => false)
+			});
+			pendingAttemptSnapshot = '';
+			await invalidateAll();
+		} finally {
+			isResettingAttempt = false;
+		}
+	}
+
 	// ── Buddy AI derived ─────────────────────────────────────────────────────
 	// Tracks which question the tutor panel was last opened for.
 	let activeTutorQuestionIndex = $state<number | null>(null);
@@ -148,6 +367,23 @@
 	const chatApi = $derived(
 		`/api/ai/tutor?lessonId=${data.lesson?.id ?? ''}&mode=${chatMode}&context=lesson`
 	);
+	const activeTutorQuestionContext = $derived.by(() => {
+		if (activeTutorQuestionIndex === null) return null;
+
+		const question = questions[activeTutorQuestionIndex];
+		if (!question) return null;
+
+		const selectedOptionId = selectedAnswers[activeTutorQuestionIndex] ?? '';
+		const selectedOption = question.options.find((option) => option.id === selectedOptionId);
+		const hasCheckedAnswer = checkedQuestions[activeTutorQuestionIndex] || submitted;
+
+		return {
+			questionText: question.text,
+			selectedAnswerText: selectedOption?.text ?? null,
+			selectedAnswerIsCorrect:
+				hasCheckedAnswer && selectedOptionId ? selectedOptionId === question.correctOptionId : null
+		};
+	});
 
 	// Reset message history on any mode change so the backend exchange counter
 	// starts fresh in the new mode (prevents tier skipping in either direction).
@@ -174,7 +410,8 @@
 					id: opts.id,
 					messages: opts.messages,
 					trigger: opts.trigger,
-					messageId: opts.messageId
+					messageId: opts.messageId,
+					lessonQuestionContext: activeTutorQuestionContext
 				}
 			})
 		})
@@ -404,116 +641,195 @@
 					<input type="hidden" name="usedTutor" value={usedTutor ? '1' : '0'} />
 				</form>
 
-				<div class="flex flex-col gap-8">
-					{#each questions as question, questionIndex (question.id)}
-						{@const checked = isChecked(questionIndex)}
-						{@const result = questionResults[questionIndex]}
-						{@const hasSelection = (selectedAnswers[questionIndex] ?? '').trim() !== ''}
-						{@const optionLabels = ['A', 'B', 'C', 'D', 'E', 'F']}
-						{@const hasAttempted = checked || submitted}
-						{@const botQuery = !hasAttempted
-							? `Give me a hint for this question without giving away the answer: "${question.text}"`
-							: result?.isCorrect
-								? `Help me understand why this answer is correct: "${question.text}"`
-								: `Explain this question and why my answer was wrong: "${question.text}"`}
-
-						<div class="flex flex-col gap-3">
-							<div class="flex items-center gap-2">
-								<span
-									class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/15 text-xs font-extrabold text-primary"
-								>
-									{questionIndex + 1}
-								</span>
-								<p class="flex-1 text-base font-semibold text-neutral">{question.text}</p>
+				<div class="flex flex-col gap-6">
+					<div
+						class="flex items-center justify-between gap-3 rounded-3xl border border-base-200 bg-base-200/70 px-4 py-3 shadow-sm"
+					>
+						<div>
+							<p class="text-xs font-semibold tracking-[0.2em] text-primary/70 uppercase">
+								Lesson flow
+							</p>
+							<p class="text-sm font-semibold text-base-content/70">{activeQuestionPrompt}</p>
+						</div>
+						<div class="flex items-center gap-2">
+							<button
+								type="button"
+								class="btn min-h-11 rounded-full btn-ghost btn-sm"
+								onclick={goToPreviousQuestion}
+								disabled={!canGoToPreviousQuestion}
+								aria-label="Go to previous question"
+							>
+								Previous
+							</button>
+							<button
+								type="button"
+								class="btn min-h-11 rounded-full btn-sm btn-primary"
+								onclick={goToNextQuestion}
+								disabled={!canGoToNextQuestion}
+								aria-label="Go to next question"
+							>
+								Next
+							</button>
+							{#if canResetAttempt && !submitted}
 								<button
 									type="button"
-									class="btn btn-circle shrink-0 btn-ghost btn-sm
-									{hasAttempted && result?.isCorrect ? 'text-success/70' : ''}
-									{hasAttempted && !result?.isCorrect ? 'text-error/70' : ''}
-									{!hasAttempted ? 'text-primary/50' : ''}"
-									onclick={() => openTutor(botQuery, questionIndex)}
-									aria-label="Ask Buddy about this question"><Bot size={16} /></button
+									class="btn min-h-11 rounded-full btn-outline btn-sm"
+									onclick={resetCompletedAttempt}
+									disabled={isResettingAttempt}
 								>
-							</div>
-
-							<div class="flex flex-col gap-2">
-								{#each question.options as answer, optIdx (answer.id)}
-									{@const isSelected = selectedAnswers[questionIndex] === answer.id}
-									{@const isCorrectOption = answer.id === question.correctOptionId}
-									<button
-										type="button"
-										class="flex min-h-14 w-full items-center gap-3 rounded-2xl border-2 px-4 py-3 text-left transition-all
-											{isSelected && !checked ? 'border-secondary bg-secondary/10 shadow-sm' : ''}
-											{!isSelected && !checked
-											? 'hover:bg-base-50 border-base-200 bg-base-100 hover:border-base-300'
-											: ''}
-											{checked && isSelected && result?.isCorrect ? 'border-success bg-success/15' : ''}
-											{checked && isSelected && !result?.isCorrect ? 'border-error bg-error/15' : ''}
-											{checked && !isSelected && isCorrectOption && !result?.isCorrect
-											? 'border-success/60 bg-success/10'
-											: ''}
-											{checked && !isSelected && !isCorrectOption ? 'border-base-200 bg-base-100 opacity-50' : ''}"
-										onclick={() => {
-											if (checked || submitted) return;
-											const next = [...selectedAnswersLocal];
-											next[questionIndex] = answer.id;
-											selectedAnswersLocal = next;
-										}}
-										disabled={checked || submitted}
-									>
-										<span
-											class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border-2 text-xs font-extrabold
-												{isSelected && !checked ? 'border-secondary bg-secondary text-secondary-content' : ''}
-												{!isSelected && !checked ? 'border-base-300 text-base-content/50' : ''}
-												{checked && isSelected && result?.isCorrect ? 'border-success bg-success text-white' : ''}
-												{checked && isSelected && !result?.isCorrect ? 'border-error bg-error text-white' : ''}
-												{checked && !isSelected && isCorrectOption && !result?.isCorrect
-												? 'border-success bg-success text-white'
-												: ''}
-												{checked && !isSelected && !isCorrectOption ? 'border-base-300 text-base-content/30' : ''}"
-											>{optionLabels[optIdx] ?? optIdx + 1}</span
-										>
-										<span class="flex-1 text-sm leading-snug font-medium break-words"
-											>{answer.text}</span
-										>
-									</button>
-								{/each}
-							</div>
-
-							<!-- Per-question result feedback -->
-							{#if checked && result?.explanation}
-								<div
-									class="flex items-start gap-3 rounded-2xl border p-3 text-sm
-										{result.isCorrect ? 'border-success/30 bg-success/10' : 'border-error/30 bg-error/10'}"
-								>
-									{#if result.isCorrect}
-										<CheckCircle size={18} class="mt-0.5 shrink-0 text-success" />
-									{:else}
-										<XCircle size={18} class="mt-0.5 shrink-0 text-error" />
-									{/if}
-									<span class="leading-relaxed text-base-content/80">{result.explanation}</span>
-								</div>
-							{/if}
-
-							<!-- Per-question Check Answer button -->
-							{#if !checked && !submitted}
-								<button
-									type="button"
-									class="btn w-full rounded-full font-bold btn-md
-										{hasSelection ? 'shadow-[0_3px_0_0_#ca8a04] btn-primary' : 'btn-disabled opacity-40'}"
-									disabled={!hasSelection}
-									onclick={() => {
-										if (!hasSelection) return;
-										const next = [...checkedQuestions];
-										next[questionIndex] = true;
-										checkedQuestions = next;
-									}}
-								>
-									<CheckCircle size={16} /> Check Answer
+									Retry
 								</button>
 							{/if}
 						</div>
-					{/each}
+					</div>
+
+					<div class="overflow-hidden rounded-[2rem]">
+						{#if activeQuestion}
+							{@const checked = activeQuestionChecked}
+							{@const result = activeQuestionResult}
+							{@const hasSelection = activeQuestionHasSelection}
+							{@const hasAttempted = checked || submitted}
+							{@const botQuery = !hasAttempted
+								? `Give me a hint for this question without giving away the answer: "${activeQuestion.text}"`
+								: result?.isCorrect
+									? `Help me understand why this answer is correct: "${activeQuestion.text}"`
+									: `Explain this question and why my answer was wrong: "${activeQuestion.text}"`}
+
+							{#key `${activeQuestion.id}-${sliderRenderKey}`}
+								<div
+									class="card border border-base-300 bg-base-100 shadow-xl"
+									in:fly={{ x: sliderTransitionX, duration: 260, opacity: 0.12 }}
+									out:fly={{ x: sliderTransitionX * -1, duration: 200, opacity: 0.08 }}
+								>
+									<div class="card-body gap-5 p-5 sm:p-6">
+										<div class="flex items-start gap-3">
+											<span
+												class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/15 text-sm font-extrabold text-primary"
+											>
+												{activeQuestionIndex + 1}
+											</span>
+											<div class="min-w-0 flex-1">
+												<p
+													class="text-xs font-semibold tracking-[0.18em] text-base-content/45 uppercase"
+												>
+													Question {activeQuestionIndex + 1}
+												</p>
+												<h2 class="mt-1 text-lg leading-tight font-bold text-neutral sm:text-xl">
+													{activeQuestion.text}
+												</h2>
+											</div>
+											<button
+												type="button"
+												class="btn btn-circle shrink-0 btn-ghost btn-sm
+												{hasAttempted && result?.isCorrect ? 'text-success/70' : ''}
+												{hasAttempted && !result?.isCorrect ? 'text-error/70' : ''}
+												{!hasAttempted ? 'text-primary/50' : ''}"
+												onclick={() => openTutor(botQuery, activeQuestionIndex)}
+												aria-label="Ask Buddy about this question"
+											>
+												<Bot size={16} />
+											</button>
+										</div>
+
+										<div class="grid gap-3">
+											{#each activeQuestion.options as answer, optIdx (answer.id)}
+												{@const isSelected = selectedAnswers[activeQuestionIndex] === answer.id}
+												{@const isCorrectOption = answer.id === activeQuestion.correctOptionId}
+												<button
+													type="button"
+													class="flex min-h-16 w-full items-center gap-3 rounded-3xl border-2 px-4 py-4 text-left transition-all duration-200 ease-out
+														{isSelected && !checked ? 'border-secondary bg-secondary/10 shadow-sm' : ''}
+														{!isSelected && !checked
+														? 'border-base-200 bg-base-100 hover:-translate-y-0.5 hover:border-base-300 hover:shadow-md'
+														: ''}
+														{checked && isSelected && result?.isCorrect ? 'border-success bg-success/15' : ''}
+														{checked && isSelected && !result?.isCorrect ? 'border-error bg-error/15' : ''}
+														{checked && !isSelected && isCorrectOption && !result?.isCorrect
+														? 'border-success/60 bg-success/10'
+														: ''}
+														{checked && !isSelected && !isCorrectOption ? 'border-base-200 bg-base-100 opacity-50' : ''}"
+													onclick={() => selectAnswer(activeQuestionIndex, answer.id)}
+													disabled={checked || submitted}
+												>
+													<span
+														class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border-2 text-xs font-extrabold
+															{isSelected && !checked ? 'border-secondary bg-secondary text-secondary-content' : ''}
+															{!isSelected && !checked ? 'border-base-300 text-base-content/50' : ''}
+															{checked && isSelected && result?.isCorrect ? 'border-success bg-success text-white' : ''}
+															{checked && isSelected && !result?.isCorrect ? 'border-error bg-error text-white' : ''}
+															{checked && !isSelected && isCorrectOption && !result?.isCorrect
+															? 'border-success bg-success text-white'
+															: ''}
+															{checked && !isSelected && !isCorrectOption ? 'border-base-300 text-base-content/30' : ''}"
+													>
+														{optionLabels[optIdx] ?? optIdx + 1}
+													</span>
+													<span
+														class="flex-1 text-sm leading-snug font-medium break-words sm:text-base"
+													>
+														{answer.text}
+													</span>
+												</button>
+											{/each}
+										</div>
+
+										{#if checked && result?.explanation}
+											<div
+												class="flex items-start gap-3 rounded-3xl border p-4 text-sm leading-relaxed
+													{result.isCorrect ? 'border-success/30 bg-success/10' : 'border-error/30 bg-error/10'}"
+											>
+												{#if result.isCorrect}
+													<CheckCircle size={18} class="mt-0.5 shrink-0 text-success" />
+												{:else}
+													<XCircle size={18} class="mt-0.5 shrink-0 text-error" />
+												{/if}
+												<span class="text-base-content/80">{result.explanation}</span>
+											</div>
+										{/if}
+
+										<div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+											<div class="text-xs text-base-content/50 sm:text-sm">
+												{#if checked}
+													Answer checked. Use Previous/Next to review the lesson flow.
+												{:else}
+													Choose an option, then check your answer to lock it in.
+												{/if}
+											</div>
+
+											{#if !checked && !submitted}
+												<button
+													type="button"
+													class="btn min-h-12 w-full rounded-full font-bold btn-md sm:w-auto
+														{hasSelection ? 'shadow-[0_3px_0_0_#ca8a04] btn-primary' : 'btn-disabled opacity-40'}"
+													disabled={!hasSelection}
+													onclick={() => checkAnswer(activeQuestionIndex)}
+												>
+													<CheckCircle size={16} /> Check Answer
+												</button>
+											{/if}
+										</div>
+									</div>
+								</div>
+							{/key}
+						{/if}
+					</div>
+
+					<div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
+						{#each questions as question, questionIndex (question.id)}
+							{@const checked = isChecked(questionIndex)}
+							{@const isCurrent = questionIndex === activeQuestionIndex}
+							<button
+								type="button"
+								class="btn min-h-11 justify-start rounded-2xl px-3 text-left btn-sm
+									{isCurrent ? 'btn-primary' : 'border border-base-200 btn-ghost'}
+									{checked && !isCurrent ? 'border-success/30 bg-success/5 text-success' : ''}"
+								onclick={() => goToQuestion(questionIndex)}
+								aria-label={`Go to question ${questionIndex + 1}`}
+							>
+								<span class="font-semibold">Q{questionIndex + 1}</span>
+							</button>
+						{/each}
+					</div>
 
 					{#if form?.error}
 						<div class="alert text-sm alert-error">{form.error}</div>
@@ -575,8 +891,8 @@
 			</div>
 		{:else}
 			<div class="flex flex-col items-center gap-1 text-center">
-				<p class="text-sm font-semibold text-neutral/70">Answer each question above</p>
-				<p class="text-xs text-base-content/40">Tap "Check Answer" after each one to continue</p>
+				<p class="text-sm font-semibold text-neutral/70">Work through each question card</p>
+				<p class="text-xs text-base-content/40">Use Previous and Next to move through the lesson</p>
 			</div>
 		{/if}
 	</div>
@@ -635,10 +951,10 @@
 
 	<!-- ── Buddy AI Overlay ────────────────────────────────────────────────── -->
 	{#if showTutorPanel}
-		<div class="absolute inset-0 z-[60] overflow-hidden">
+		<div class="pointer-events-none absolute inset-0 z-[60] overflow-hidden">
 			<!-- Backdrop -->
 			<div
-				class="absolute inset-0 bg-black/40"
+				class="pointer-events-auto absolute inset-0 bg-black/25 backdrop-blur-[2px] transition-opacity duration-200"
 				role="button"
 				tabindex="-1"
 				aria-label="Close Buddy AI"
@@ -646,13 +962,13 @@
 				onkeydown={(e) => e.key === 'Escape' && (showTutorPanel = false)}
 			></div>
 
-			<!-- Slide-up panel -->
+			<!-- Floating window -->
 			<div
-				class="absolute right-0 bottom-0 left-0 flex h-[70%] flex-col rounded-t-2xl bg-base-100 shadow-2xl"
+				class="pointer-events-auto absolute inset-x-3 top-auto bottom-4 flex h-[min(70vh,38rem)] max-h-[calc(100%-2rem)] flex-col overflow-hidden rounded-[1.75rem] border border-base-300/70 bg-base-100 shadow-[0_24px_80px_rgba(15,23,42,0.28)] ring-1 ring-base-100/60 sm:right-4 sm:bottom-5 sm:left-auto sm:h-[min(72vh,40rem)] sm:w-[min(26rem,calc(100vw-2rem))]"
 			>
 				<!-- Panel header -->
 				<div
-					class="flex shrink-0 items-center justify-between rounded-t-2xl bg-primary px-4 py-3 text-primary-content"
+					class="flex shrink-0 items-center justify-between border-b border-primary/20 bg-primary px-4 py-3 text-primary-content"
 				>
 					<div class="flex items-center gap-2">
 						<div
@@ -682,7 +998,7 @@
 
 				<!-- Messages -->
 				<div
-					class="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain bg-base-200/40 p-4"
+					class="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain bg-gradient-to-b from-base-200/30 to-base-200/60 p-4"
 					role="log"
 					aria-live="polite"
 					aria-label="Buddy AI chat messages"
@@ -792,7 +1108,7 @@
 				</div>
 
 				<!-- Input bar -->
-				<div class="shrink-0 border-t border-base-200 bg-base-100 p-3">
+				<div class="shrink-0 border-t border-base-200 bg-base-100/95 p-3 backdrop-blur-sm">
 					<form onsubmit={handleTutorSubmit} class="flex items-center gap-2">
 						<label for="buddy-input" class="sr-only">Ask Buddy a question</label>
 						<input

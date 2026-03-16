@@ -52,12 +52,25 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 	}
 
 	const body = await request.json();
-	const parsed = z.object({ messages: z.array(z.unknown()) }).safeParse(body);
+	const parsed = z
+		.object({
+			messages: z.array(z.unknown()),
+			lessonQuestionContext: z
+				.object({
+					questionText: z.string().min(1),
+					selectedAnswerText: z.string().min(1).nullable(),
+					selectedAnswerIsCorrect: z.boolean().nullable()
+				})
+				.nullable()
+				.optional()
+		})
+		.safeParse(body);
 	if (!parsed.success) {
 		return new Response('Invalid payload', { status: 400 });
 	}
 
 	const messages = parsed.data.messages as Array<Omit<UIMessage, 'id'>>;
+	const lessonQuestionContext = parsed.data.lessonQuestionContext ?? null;
 
 	// Cap conversation history: keep the first message (seeded question context)
 	// plus the most recent 20 to avoid silently overflowing the model context window.
@@ -124,6 +137,18 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 	const nextExchange = assistantTurnCount + 1;
 
 	let modeBlock: string;
+	let lessonAnswerContext = '';
+	if (
+		tutorContext === 'lesson' &&
+		lessonQuestionContext?.selectedAnswerText &&
+		lessonQuestionContext.selectedAnswerIsCorrect === false
+	) {
+		lessonAnswerContext = `
+LESSON ATTEMPT CONTEXT:
+- Question: ${lessonQuestionContext.questionText}
+- Student's selected wrong answer: ${lessonQuestionContext.selectedAnswerText}
+- When explaining, explicitly address why that chosen answer is incorrect before reinforcing the correct reasoning.`;
+	}
 
 	if (tutorMode === 'hint') {
 		// ── Hint mode (both contexts) ─────────────────────────────────────────
@@ -183,6 +208,7 @@ RULES:
 7. You MUST always end every response with at least one sentence of visible text addressed directly to the student — even after calling a tool. A tool call is never a substitute for a reply. Never produce a response that is empty or contains only your internal reasoning.
 ${modeBlock}
 ${lessonString}
+${lessonAnswerContext}
 ${memoryString}`;
 
 	// Capture userId before entering any async callbacks to avoid referencing

@@ -74,22 +74,14 @@
 
 	const stripped = $derived(stripThinkBlocks(text, streaming));
 
-	// During active streaming, skip the markdown parser entirely — re-parsing on every
-	// incoming chunk is expensive. Render as plain text until the stream completes.
 	const html = $derived(
-		streaming
-			? null
-			: (marked(stripped, {
-					renderer,
-					gfm: true,
-					breaks: false
-				}) as string)
+		marked(stripped, {
+			renderer,
+			gfm: true,
+			breaks: false
+		}) as string
 	);
 </script>
 
 <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-{#if html !== null}
-	<div class="markdown-body">{@html html}</div>
-{:else}
-	<p class="whitespace-pre-wrap">{stripped}</p>
-{/if}
+<div class="markdown-body">{@html html}</div>

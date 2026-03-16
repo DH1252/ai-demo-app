@@ -12,8 +12,42 @@ const EMBEDDING_BASE_URL = (env.OPENAI_BASE_URL || 'https://integrate.api.nvidia
 	''
 );
 const EMBEDDING_API_KEY = env.NVIDIA_EMBED_API_KEY || env.OPENAI_API_KEY || '';
+const EMBEDDING_TIMEOUT_MS = 15_000;
 
 type EmbeddingInputType = 'query' | 'passage';
+
+function logEmbeddingFailure(
+	error: unknown,
+	inputType: EmbeddingInputType,
+	batchSize: number
+): void {
+	let target = EMBEDDING_BASE_URL;
+	try {
+		const parsedUrl = new URL(`${EMBEDDING_BASE_URL}/embeddings`);
+		target = `${parsedUrl.origin}${parsedUrl.pathname}`;
+	} catch {
+		// Fall back to the configured base URL string if URL parsing fails.
+	}
+
+	const errorWithCause = error as Error & {
+		cause?: { code?: string; message?: string; attemptedAddresses?: string[]; timeout?: number };
+		code?: string;
+	};
+
+	console.error('Embedding request failed', {
+		inputType,
+		batchSize,
+		timeoutMs: EMBEDDING_TIMEOUT_MS,
+		target,
+		errorName: errorWithCause?.name ?? 'UnknownError',
+		errorMessage: errorWithCause?.message ?? 'Unknown embedding failure',
+		errorCode: errorWithCause?.code,
+		causeCode: errorWithCause?.cause?.code,
+		causeMessage: errorWithCause?.cause?.message,
+		attemptedAddresses: errorWithCause?.cause?.attemptedAddresses,
+		causeTimeoutMs: errorWithCause?.cause?.timeout
+	});
+}
 
 export async function generateEmbedding(
 	text: string,
@@ -48,20 +82,26 @@ export async function generateEmbeddingsBatch(
 	const results: number[][] = [];
 
 	for (const batch of batches) {
-		const response = await fetch(`${EMBEDDING_BASE_URL}/embeddings`, {
-			method: 'POST',
-			headers: {
-				Authorization: `Bearer ${EMBEDDING_API_KEY}`,
-				'Content-Type': 'application/json'
-			},
-			body: JSON.stringify({
-				model: EMBEDDING_MODEL,
-				input: batch,
-				input_type: inputType,
-				encoding_format: 'float'
-			}),
-			signal: AbortSignal.timeout(15_000)
-		});
+		let response: Response;
+		try {
+			response = await fetch(`${EMBEDDING_BASE_URL}/embeddings`, {
+				method: 'POST',
+				headers: {
+					Authorization: `Bearer ${EMBEDDING_API_KEY}`,
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify({
+					model: EMBEDDING_MODEL,
+					input: batch,
+					input_type: inputType,
+					encoding_format: 'float'
+				}),
+				signal: AbortSignal.timeout(EMBEDDING_TIMEOUT_MS)
+			});
+		} catch (error) {
+			logEmbeddingFailure(error, inputType, batch.length);
+			throw error;
+		}
 
 		if (!response.ok) {
 			const body = await response.text();

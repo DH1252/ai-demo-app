@@ -78,6 +78,7 @@ export const userProgress = sqliteTable(
 		status: text('status', { enum: ['completed', 'active'] })
 			.notNull()
 			.default('active'),
+		attemptState: text('attempt_state'),
 		// Server-recorded ISO timestamp of first lesson activation — used for
 		// server-side speed bonus computation (replaces client-sent elapsedSeconds).
 		startedAt: text('started_at')

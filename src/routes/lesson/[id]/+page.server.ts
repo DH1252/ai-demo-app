@@ -4,7 +4,11 @@ import { and, eq, max, sql } from 'drizzle-orm';
 import type { Actions, PageServerLoad } from './$types';
 import { getS3PresignedUrl } from '$lib/server/s3';
 import { error, fail, redirect } from '@sveltejs/kit';
-import { withDerivedLessonStatus } from '$lib/server/lessonProgress';
+import {
+	getLessonAttemptLifecycle,
+	serializeLessonAttemptState,
+	withDerivedLessonStatus
+} from '$lib/server/lessonProgress';
 import { getOrderedLessonsForUser } from '$lib/server/learningPaths';
 import { computeRegenHearts, computeStreak, msUntilNextHeart } from '$lib/server/rewardUtils';
 
@@ -47,14 +51,31 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 	}
 
 	const nowIso = new Date().toISOString();
+	const existingProgressRows = await db
+		.select({
+			status: userProgress.status,
+			attemptState: userProgress.attemptState,
+			startedAt: userProgress.startedAt
+		})
+		.from(userProgress)
+		.where(and(eq(userProgress.userId, locals.user.id), eq(userProgress.lessonId, lesson.id)))
+		.limit(1);
+	const attemptLifecycle = getLessonAttemptLifecycle(existingProgressRows[0]);
 
 	if (locals.user.role !== 'admin') {
 		// Upsert an active progress row, recording startedAt on first insert only.
 		// onConflictDoNothing preserves the original startedAt for returning students.
-		await db
-			.insert(userProgress)
-			.values({ userId: locals.user.id, lessonId: lesson.id, status: 'active', startedAt: nowIso })
-			.onConflictDoNothing();
+		if (!existingProgressRows[0]) {
+			await db
+				.insert(userProgress)
+				.values({
+					userId: locals.user.id,
+					lessonId: lesson.id,
+					status: 'active',
+					startedAt: nowIso
+				})
+				.onConflictDoNothing();
+		}
 	}
 
 	// Compute next lesson in the learning path for smart navigation.
@@ -113,6 +134,9 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 
 	return {
 		lesson: { ...lesson, s3VideoUrl, s3VideoUrlExpiresAt },
+		attemptLifecycle,
+		persistedAttemptState:
+			attemptLifecycle.mode === 'resume' ? attemptLifecycle.attemptState : null,
 		nextLessonId,
 		heartsGated,
 		nextHeartInSeconds,
@@ -164,7 +188,11 @@ export const actions = {
 							.limit(1)
 					: Promise.resolve([] as { hearts: number; heartsLastUpdated: string | null }[]),
 				db
-					.select({ status: userProgress.status, startedAt: userProgress.startedAt })
+					.select({
+						status: userProgress.status,
+						attemptState: userProgress.attemptState,
+						startedAt: userProgress.startedAt
+					})
 					.from(userProgress)
 					.where(and(eq(userProgress.userId, userId), eq(userProgress.lessonId, lesson.id)))
 					.limit(1)
@@ -240,7 +268,13 @@ export const actions = {
 		const todayIso = nowIso.slice(0, 10); // YYYY-MM-DD
 
 		const alreadyCompleted = existingProgressRows[0]?.status === 'completed';
-		const startedAtIso = existingProgressRows[0]?.startedAt ?? null;
+		const attemptLifecycle = getLessonAttemptLifecycle(existingProgressRows[0]);
+		const startedAtIso = attemptLifecycle.startedAt ?? null;
+		const serializedAttemptState = serializeLessonAttemptState({
+			selectedAnswers: normalizedAnswers,
+			checkedQuestions: Array.from({ length: questions.length }, () => true),
+			updatedAt: nowIso
+		});
 
 		// Server-side elapsed seconds (capped at 1 hour).
 		const elapsedSeconds = startedAtIso
@@ -326,11 +360,22 @@ export const actions = {
 					if (!alreadyCompleted) {
 						await tx
 							.insert(userProgress)
-							.values({ userId, lessonId: lesson.id, status: 'completed', startedAt: startedAtIso })
+							.values({
+								userId,
+								lessonId: lesson.id,
+								status: 'completed',
+								attemptState: serializedAttemptState,
+								startedAt: startedAtIso
+							})
 							.onConflictDoUpdate({
 								target: [userProgress.userId, userProgress.lessonId],
-								set: { status: 'completed' }
+								set: { status: 'completed', attemptState: serializedAttemptState }
 							});
+					} else {
+						await tx
+							.update(userProgress)
+							.set({ attemptState: serializedAttemptState })
+							.where(and(eq(userProgress.userId, userId), eq(userProgress.lessonId, lesson.id)));
 					}
 				} else {
 					// Imperfect run — partial XP only, no coins/streak/progress changes.
@@ -393,6 +438,7 @@ export const actions = {
 				: null,
 			result: {
 				isPerfect,
+				canReset: alreadyCompleted,
 				questionResults,
 				xpAwarded,
 				alreadyCompleted,

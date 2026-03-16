@@ -1,0 +1,1 @@
+ALTER TABLE `user_progress` ADD `attempt_state` text;
